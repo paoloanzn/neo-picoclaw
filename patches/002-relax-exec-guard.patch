@@ -1,0 +1,302 @@
+From be582c9a5b06b19ab7c629e00421b83020b07b80 Mon Sep 17 00:00:00 2001
+From: paoloanzn <paolo@gladium.ai>
+Date: Tue, 17 Mar 2026 17:49:54 +0100
+Subject: [PATCH] feat(tools): relax exec guard to allow shell features and
+ system paths
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The exec tool's safety guard was overly aggressive, blocking normal shell
+features (command substitution, variable expansion, heredocs, eval, source)
+and standard dev tools (git push, ssh, chmod, kill) making the tool
+nearly unusable when workspace restriction was enabled.
+
+Changes:
+- Remove deny patterns for shell features: $(), ${}, backticks, heredocs,
+  eval, source — these are core shell functionality, not security threats
+- Remove deny patterns for dev tools: git push, ssh, chmod, chown, kill,
+  pkill, killall — normal operations that should not be blocked
+- Add safe system path prefixes (/usr/, /bin/, /sbin/, /lib/, /opt/,
+  /tmp/, /proc/, /sys/, plus macOS paths) so commands referencing system
+  tools and binaries are not blocked by workspace boundary checks
+- Update tests to reflect the relaxed deny list and add new tests for
+  system paths and shell features being allowed
+
+Security is preserved through:
+- Destructive commands still blocked (rm -rf, disk wipe, shutdown, etc.)
+- Remote code execution still blocked (curl|sh, wget|sh, $(curl..))
+- Privilege escalation still blocked (sudo)
+- System/global package installs still blocked
+- Container operations still blocked (docker run/exec)
+- Workspace boundary still enforced for working directory and file tools
+- Path traversal (../) still blocked
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ pkg/tools/shell.go      | 83 ++++++++++++++++++++++++++++++++---------
+ pkg/tools/shell_test.go | 76 ++++++++++++++++++++++++++++++++-----
+ 2 files changed, 131 insertions(+), 28 deletions(-)
+
+diff --git a/pkg/tools/shell.go b/pkg/tools/shell.go
+index 0dc85ae..be3e917 100644
+--- a/pkg/tools/shell.go
++++ b/pkg/tools/shell.go
+@@ -29,11 +29,21 @@ type ExecTool struct {
+ }
+ 
+ var (
++	// defaultDenyPatterns blocks genuinely dangerous commands: destructive file
++	// operations, disk wiping, system control, remote code execution, privilege
++	// escalation, and container escape.
++	//
++	// Normal shell features (command substitution, variable expansion, heredocs,
++	// eval, source) and standard dev tools (git push, ssh, chmod, kill) are
++	// intentionally NOT blocked — blocking them makes the exec tool unusable
++	// for real development work. Security for those operations is provided by
++	// the workspace restriction (working dir + file tool sandboxing) instead.
+ 	defaultDenyPatterns = []*regexp.Regexp{
++		// Destructive file operations
+ 		regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`),
+ 		regexp.MustCompile(`\bdel\s+/[fq]\b`),
+ 		regexp.MustCompile(`\brmdir\s+/s\b`),
+-		// Match disk wiping commands (must be followed by space/args)
++		// Disk wiping commands (must be followed by space/args)
+ 		regexp.MustCompile(
+ 			`\b(format|mkfs|diskpart)\b\s`,
+ 		),
+@@ -42,41 +52,35 @@ var (
+ 		regexp.MustCompile(
+ 			`>\s*/dev/(sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|loop\d|dm-\d|md\d|sr\d|nbd\d)`,
+ 		),
++		// System control
+ 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
++		// Fork bomb
+ 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
+-		regexp.MustCompile(`\$\([^)]+\)`),
+-		regexp.MustCompile(`\$\{[^}]+\}`),
+-		regexp.MustCompile("`[^`]+`"),
++		// Pipe to shell interpreter
+ 		regexp.MustCompile(`\|\s*sh\b`),
+ 		regexp.MustCompile(`\|\s*bash\b`),
++		// Chained destructive commands
+ 		regexp.MustCompile(`;\s*rm\s+-[rf]`),
+ 		regexp.MustCompile(`&&\s*rm\s+-[rf]`),
+ 		regexp.MustCompile(`\|\|\s*rm\s+-[rf]`),
+-		regexp.MustCompile(`<<\s*EOF`),
+-		regexp.MustCompile(`\$\(\s*cat\s+`),
++		// Remote code injection via command substitution
+ 		regexp.MustCompile(`\$\(\s*curl\s+`),
+ 		regexp.MustCompile(`\$\(\s*wget\s+`),
+-		regexp.MustCompile(`\$\(\s*which\s+`),
+-		regexp.MustCompile(`\bsudo\b`),
+-		regexp.MustCompile(`\bchmod\s+[0-7]{3,4}\b`),
+-		regexp.MustCompile(`\bchown\b`),
+-		regexp.MustCompile(`\bpkill\b`),
+-		regexp.MustCompile(`\bkillall\b`),
+-		regexp.MustCompile(`\bkill\b`),
++		// Remote code execution via pipe
+ 		regexp.MustCompile(`\bcurl\b.*\|\s*(sh|bash)`),
+ 		regexp.MustCompile(`\bwget\b.*\|\s*(sh|bash)`),
++		// Privilege escalation
++		regexp.MustCompile(`\bsudo\b`),
++		// Global package installation
+ 		regexp.MustCompile(`\bnpm\s+install\s+-g\b`),
+ 		regexp.MustCompile(`\bpip\s+install\s+--user\b`),
++		// System package management
+ 		regexp.MustCompile(`\bapt\s+(install|remove|purge)\b`),
+ 		regexp.MustCompile(`\byum\s+(install|remove)\b`),
+ 		regexp.MustCompile(`\bdnf\s+(install|remove)\b`),
++		// Container operations
+ 		regexp.MustCompile(`\bdocker\s+run\b`),
+ 		regexp.MustCompile(`\bdocker\s+exec\b`),
+-		regexp.MustCompile(`\bgit\s+push\b`),
+-		regexp.MustCompile(`\bgit\s+force\b`),
+-		regexp.MustCompile(`\bssh\b.*@`),
+-		regexp.MustCompile(`\beval\b`),
+-		regexp.MustCompile(`\bsource\s+.*\.sh\b`),
+ 	}
+ 
+ 	// absolutePathPattern matches absolute file paths in commands (Unix and Windows).
+@@ -94,8 +98,48 @@ var (
+ 		"/dev/stdout":  true,
+ 		"/dev/stderr":  true,
+ 	}
++
++	// safeSystemPrefixes are directory prefixes for system paths that commands
++	// legitimately reference (tools, binaries, libraries, temp files). Absolute
++	// paths under these prefixes are exempt from the workspace boundary check
++	// in guardCommand, so commands like "ls /usr/bin/" or "/usr/bin/env python3"
++	// work when workspace restriction is enabled.
++	safeSystemPrefixes = []string{
++		"/usr/",
++		"/bin/",
++		"/sbin/",
++		"/lib/",
++		"/lib64/",
++		"/opt/",
++		"/tmp/",
++		"/proc/",
++		"/sys/",
++		"/nix/",
++	}
+ )
+ 
++func init() {
++	if runtime.GOOS == "darwin" {
++		safeSystemPrefixes = append(safeSystemPrefixes,
++			"/Applications/",
++			"/Library/",
++			"/System/",
++			"/private/",
++		)
++	}
++}
++
++// hasSafeSystemPrefix returns true if path starts with a known system directory
++// prefix that is safe to reference in commands regardless of workspace restriction.
++func hasSafeSystemPrefix(path string) bool {
++	for _, prefix := range safeSystemPrefixes {
++		if strings.HasPrefix(path, prefix) {
++			return true
++		}
++	}
++	return false
++}
++
+ func NewExecTool(workingDir string, restrict bool, allowPaths ...[]*regexp.Regexp) (*ExecTool, error) {
+ 	return NewExecToolWithConfig(workingDir, restrict, nil, allowPaths...)
+ }
+@@ -427,6 +471,9 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
+ 			if safePaths[p] {
+ 				continue
+ 			}
++			if hasSafeSystemPrefix(p) {
++				continue
++			}
+ 			if isAllowedPath(p, t.allowedPathPatterns) {
+ 				continue
+ 			}
+diff --git a/pkg/tools/shell_test.go b/pkg/tools/shell_test.go
+index c455302..5ee7e11 100644
+--- a/pkg/tools/shell_test.go
++++ b/pkg/tools/shell_test.go
+@@ -151,7 +151,7 @@ func TestShellTool_DangerousCommand(t *testing.T) {
+ 	}
+ }
+ 
+-func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
++func TestShellTool_DangerousCommand_DockerExecBlocked(t *testing.T) {
+ 	tool, err := NewExecTool("", false)
+ 	if err != nil {
+ 		t.Errorf("unable to configure exec tool: %s", err)
+@@ -159,12 +159,12 @@ func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
+ 
+ 	ctx := context.Background()
+ 	args := map[string]any{
+-		"command": "kill 12345",
++		"command": "docker exec mycontainer ls",
+ 	}
+ 
+ 	result := tool.Execute(ctx, args)
+ 	if !result.IsError {
+-		t.Errorf("Expected kill command to be blocked")
++		t.Errorf("Expected docker exec command to be blocked")
+ 	}
+ 	if !strings.Contains(result.ForLLM, "blocked") && !strings.Contains(result.ForUser, "blocked") {
+ 		t.Errorf("Expected blocked message, got ForLLM: %s, ForUser: %s", result.ForLLM, result.ForUser)
+@@ -496,7 +496,7 @@ func TestShellTool_CustomAllowPatterns(t *testing.T) {
+ 		Tools: config.ToolsConfig{
+ 			Exec: config.ExecConfig{
+ 				EnableDenyPatterns:  true,
+-				CustomAllowPatterns: []string{`\bgit\s+push\s+origin\b`},
++				CustomAllowPatterns: []string{`\bsudo\s+apt\s+update\b`},
+ 			},
+ 		},
+ 	}
+@@ -506,20 +506,76 @@ func TestShellTool_CustomAllowPatterns(t *testing.T) {
+ 		t.Fatalf("unable to configure exec tool: %s", err)
+ 	}
+ 
+-	// "git push origin main" should be allowed by custom allow pattern.
++	// "sudo apt update" should be allowed by custom allow pattern.
+ 	result := tool.Execute(context.Background(), map[string]any{
+-		"command": "git push origin main",
++		"command": "sudo apt update",
+ 	})
+ 	if result.IsError && strings.Contains(result.ForLLM, "blocked") {
+-		t.Errorf("custom allow pattern should exempt 'git push origin main', got: %s", result.ForLLM)
++		t.Errorf("custom allow pattern should exempt 'sudo apt update', got: %s", result.ForLLM)
+ 	}
+ 
+-	// "git push upstream main" should still be blocked (does not match allow pattern).
++	// "sudo cat /etc/shadow" should still be blocked (does not match allow pattern).
+ 	result = tool.Execute(context.Background(), map[string]any{
+-		"command": "git push upstream main",
++		"command": "sudo cat /etc/shadow",
+ 	})
+ 	if !result.IsError {
+-		t.Errorf("'git push upstream main' should still be blocked by deny pattern")
++		t.Errorf("'sudo cat /etc/shadow' should still be blocked by deny pattern")
++	}
++}
++
++// TestShellTool_SystemPathsAllowed verifies that commands referencing system paths
++// (tools, binaries, libraries) are not blocked by workspace restriction.
++func TestShellTool_SystemPathsAllowed(t *testing.T) {
++	tmpDir := t.TempDir()
++	tool, err := NewExecTool(tmpDir, true)
++	if err != nil {
++		t.Fatalf("unable to configure exec tool: %s", err)
++	}
++
++	// These commands reference system paths outside the workspace but should be
++	// allowed because they use safe system path prefixes.
++	commands := []string{
++		"ls /usr/bin/env",
++		"/usr/bin/env echo hello",
++		"file /bin/sh",
++		"ls /opt/homebrew/bin/",
++		"cat /tmp/test.log",
++		"ls /proc/self/status",
++	}
++
++	for _, cmd := range commands {
++		result := tool.Execute(context.Background(), map[string]any{"command": cmd})
++		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
++			t.Errorf("system path should not be blocked by workspace check: %s\n  error: %s", cmd, result.ForLLM)
++		}
++	}
++}
++
++// TestShellTool_ShellFeaturesAllowed verifies that normal shell features (command
++// substitution, variable expansion, heredocs) are not blocked by deny patterns.
++func TestShellTool_ShellFeaturesAllowed(t *testing.T) {
++	tool, err := NewExecTool("", false)
++	if err != nil {
++		t.Fatalf("unable to configure exec tool: %s", err)
++	}
++
++	commands := []string{
++		"echo $(date)",
++		"echo ${HOME}",
++		"echo `whoami`",
++		"cat << EOF\nhello\nEOF",
++		"eval echo hello",
++		"git push origin main",
++		"ssh user@host ls",
++		"chmod 755 script.sh",
++		"kill -0 1234",
++	}
++
++	for _, cmd := range commands {
++		result := tool.Execute(context.Background(), map[string]any{"command": cmd})
++		if result.IsError && strings.Contains(result.ForLLM, "dangerous pattern") {
++			t.Errorf("normal shell/dev command should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
++		}
+ 	}
+ }
+ 
+-- 
+2.39.5 (Apple Git-154)
+

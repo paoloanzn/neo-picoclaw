@@ -28,3 +28,10 @@
 - **Upstream PR:** None (custom operational framework unlikely to be accepted upstream)
 - **Risk:** LOW — additive only. Adds one line to workspace listing, one new rule to system prompt, and one new template file. No existing behavior changed.
 - **Added:** 2026-03-17
+
+## 002-relax-exec-guard
+- **Purpose:** Relax the exec tool's safety guard so workspace restriction is usable for real development. Removes deny patterns that blocked normal shell features (command substitution `$()`, variable expansion `${}`, backticks, heredocs, eval, source) and standard dev tools (git push, ssh, chmod, chown, kill). Adds safe system path prefixes (`/usr/`, `/bin/`, `/tmp/`, etc.) so commands referencing system tools/binaries aren't blocked by workspace boundary checks. Security is preserved for genuinely dangerous operations (rm -rf, disk wipe, sudo, remote code exec, docker, system packages).
+- **Files:** `pkg/tools/shell.go`, `pkg/tools/shell_test.go`
+- **Upstream PR:** None (upstream may prefer the stricter defaults for safety-first deployments)
+- **Risk:** MEDIUM — modifies security-adjacent code. Reduces deny list from ~30 to ~24 patterns and widens path allowlist. Destructive/escalation patterns remain blocked. Tests updated and passing.
+- **Added:** 2026-03-17
