@@ -1,0 +1,134 @@
+name: Custom Fork Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.2.3-custom.2)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as pre-release"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "picoclaw-ci"
+          git config user.email "ci@picoclaw.dev"
+
+      - name: Apply patches to upstream
+        run: ./scripts/apply-patches.sh
+
+      - name: Setup Go
+        id: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: vendor/picoclaw/go.mod
+
+      - name: Copy custom GoReleaser config
+        run: cp .goreleaser-custom.yaml vendor/picoclaw/.goreleaser.yaml
+
+      - name: Create tag on patched source
+        working-directory: vendor/picoclaw
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: ~> v2
+          args: release --clean
+          workdir: vendor/picoclaw
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOVERSION: ${{ steps.setup-go.outputs.go-version }}
+
+      - name: Upload artifacts to fork release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          # GoReleaser creates the release on the vendor/picoclaw git repo
+          # (which points to upstream). We need to upload the built artifacts
+          # to OUR fork's release instead.
+
+          # Create the release on our fork if it doesn't exist
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_TAG" \
+              --prerelease=${{ inputs.prerelease }} \
+              --notes "Building... artifacts will be uploaded shortly."
+
+          # Upload all dist artifacts
+          for f in vendor/picoclaw/dist/*.tar.gz vendor/picoclaw/dist/*.zip vendor/picoclaw/dist/checksums.txt; do
+            [ -f "$f" ] && gh release upload "$RELEASE_TAG" "$f" --clobber
+          done
+
+      - name: Update release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          # Read PATCHES.md and generate release notes
+          UPSTREAM_TAG=$(grep '^UPSTREAM_TAG=' UPSTREAM.conf | cut -d'"' -f2)
+          UPSTREAM_SHA=$(grep '^UPSTREAM_SHA=' UPSTREAM.conf | cut -d'"' -f2)
+          PATCH_COUNT=$(ls patches/*.patch 2>/dev/null | wc -l | tr -d ' ')
+
+          # Build patch table
+          PATCH_TABLE="| # | Patch | Description |"
+          PATCH_TABLE+="\n|---|-------|-------------|"
+          for p in patches/*.patch; do
+            NUM=$(basename "$p" | cut -d'-' -f1)
+            NAME=$(basename "$p" .patch | sed 's/^[0-9]*-//')
+            DESC=$(head -4 "$p" | grep '^Subject:' | sed 's/^Subject: \[PATCH\] //')
+            PATCH_TABLE+="\n| $NUM | \`$NAME\` | $DESC |"
+          done
+
+          NOTES=$(cat <<EOF
+          ## PicoClaw $RELEASE_TAG
+
+          Custom fork of [sipeed/picoclaw $UPSTREAM_TAG](https://github.com/sipeed/picoclaw/releases/tag/$UPSTREAM_TAG) with $PATCH_COUNT patches applied.
+
+          ### Patches
+
+          $(echo -e "$PATCH_TABLE")
+
+          ### Quick Install
+
+          Download the archive for your platform below, extract, and run:
+
+          \`\`\`bash
+          tar xzf picoclaw_*.tar.gz
+          sudo mv picoclaw /usr/local/bin/
+          picoclaw --version
+          \`\`\`
+
+          Or build from patched source:
+
+          \`\`\`bash
+          git clone https://github.com/paoloanzn/picoclaw && cd picoclaw && ./scripts/apply-patches.sh && cd vendor/picoclaw && make install
+          \`\`\`
+
+          ---
+          **Base:** sipeed/picoclaw $UPSTREAM_TAG (\`${UPSTREAM_SHA:0:8}\`)
+          EOF
+          )
+
+          gh release edit "$RELEASE_TAG" --notes "$NOTES"
