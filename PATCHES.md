@@ -36,16 +36,16 @@
 - **Risk:** MEDIUM — modifies security-adjacent code. Reduces deny list from ~30 to ~24 patterns and widens path allowlist. Destructive/escalation patterns remain blocked. Tests updated and passing.
 - **Added:** 2026-03-17
 
-## 003-ci-autofix-agent-sdk
-- **Purpose:** Add fully automated cloud-based patch maintenance pipeline. When upstream releases a new tag, the auto-fix workflow tries all patches, invokes Claude Agent SDK to regenerate any that fail, validates the full sequence, and creates a PR — all without local CLI or manual intervention. Replaces the local `ai-regenerate-patch.sh` approach with a headless CI-compatible Node.js script. Also updates `upstream-watch.yml` to trigger the new auto-fix pipeline instead of the basic `patch-ci.yml`.
-- **Files:** `.github/workflows/patch-autofix.yml`, `.github/workflows/upstream-watch.yml`, `scripts/ai-regenerate-patch-ci.mjs`, `scripts/package.json`
-- **Upstream PR:** None (custom fork maintenance infrastructure)
-- **Risk:** LOW — additive CI workflows and scripts only. No application code changed. Requires `ANTHROPIC_API_KEY` secret in GitHub Actions.
-- **Added:** 2026-03-17
-
-## 004-fix-subagent-tools
+## 003-fix-subagent-tools
 - **Purpose:** Fix critical bug where subagents cannot use any tools. `SubagentManager` was initialized with an empty `ToolRegistry` and `SetTools()` was never called after the multi-agent refactor, so all subagent tool invocations returned `"tool not found"`. Fix adds `ToolRegistry.Clone()` method and wires it into `registerSharedTools()` to propagate file, exec, web, and other tools to subagents while excluding spawn/spawn_status (preventing recursive spawning).
 - **Files:** `pkg/tools/registry.go`, `pkg/tools/registry_test.go`, `pkg/agent/loop.go`
-- **Upstream PR:** Likely upstreamable — this is a clear regression fix
+- **Upstream PR:** https://github.com/sipeed/picoclaw/pull/1711
 - **Risk:** LOW — single-line wiring fix plus defensive Clone helper. No behavioral change for existing tools. 3 new tests added.
+- **Added:** 2026-03-17
+
+## 004-readme-install-line
+- **Purpose:** Add a prominent quick-install one-liner block at the top of the upstream README for the custom fork. Gives users a single copy-paste command to clone, apply patches, and build. Links to PATCHES.md for patch details.
+- **Files:** `README.md`
+- **Upstream PR:** None (fork-specific install instructions)
+- **Risk:** LOW — additive only. Inserts a blockquote after the header; no existing content modified.
 - **Added:** 2026-03-17

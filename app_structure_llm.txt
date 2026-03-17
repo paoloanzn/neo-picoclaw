@@ -21,10 +21,10 @@
 ## Active Patches (v0.2.3-custom.1)
 - 001-add-sop-framework: SOP execution framework in workspace template + system prompt
 - 002-relax-exec-guard: Relaxed exec tool safety guard for usable workspace restriction
-- 003-ci-autofix-agent-sdk: Cloud-based AI patch auto-fix pipeline
-- 004-fix-subagent-tools: Fix subagent empty tool registry (upstream PR #1711)
+- 003-fix-subagent-tools: Fix subagent empty tool registry (upstream PR #1711)
+- 004-readme-install-line: Quick install one-liner in README for custom fork
 
-## CI Workflows
+## CI Workflows (fork-level, not patched)
 - .github/workflows/patch-ci.yml: Validates patches on push/PR
 - .github/workflows/upstream-watch.yml: Daily cron, detects new upstream tags
 - .github/workflows/patch-autofix.yml: AI auto-fix pipeline (Claude Agent SDK)
@@ -36,13 +36,15 @@
 - pkg/agent/context.go (patch 001: SOP instructions in system prompt)
 - pkg/tools/shell.go (patch 002: exec guard deny patterns + safe system paths)
 - pkg/tools/shell_test.go (patch 002: updated tests)
-- pkg/tools/registry.go (patch 004: Clone() method)
-- pkg/agent/loop.go (patch 004: SetTools wiring)
+- pkg/tools/registry.go (patch 003: Clone() method)
+- pkg/agent/loop.go (patch 003: SetTools wiring)
 - workspace/sops/README.md (patch 001: SOP template)
+- README.md (patch 004: quick install block)
 
 ## Notes
-- The upstream PR for patch 004 is at https://github.com/sipeed/picoclaw/pull/1711
-  If merged, patch 004 becomes redundant on next upstream upgrade
+- The upstream PR for patch 003 is at https://github.com/sipeed/picoclaw/pull/1711
+  If merged, patch 003 becomes redundant on next upstream upgrade
+- CI workflows and scripts are fork-level files, not upstream patches
 - cmd/**/workspace is in .gitignore; workspace template source is workspace/ (root)
 - Embedded copy via //go:generate cp -r ../../../../workspace .
 - Version scheme: v{upstream}-custom.{increment} (e.g., v0.2.3-custom.1)

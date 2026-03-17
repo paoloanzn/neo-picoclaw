@@ -1,0 +1,38 @@
+From 5081fe8178738480e142f21d1b47d0fbee17026a Mon Sep 17 00:00:00 2001
+From: picoclaw-ci <ci@picoclaw.dev>
+Date: Tue, 17 Mar 2026 19:13:52 +0100
+Subject: [PATCH] docs: add quick install one-liner for custom fork
+
+Add a prominent install block at the top of the README with a single
+command to clone, apply patches, and build the custom fork. Lists
+the active patches and links to PATCHES.md for details.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ README.md | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/README.md b/README.md
+index 159ac70..0c6c612 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,16 @@
+ 
+ ---
+ 
++> **Quick Install (Custom Fork by [@paoloanzn](https://github.com/paoloanzn/picoclaw))**
++>
++> ```bash
++> git clone https://github.com/paoloanzn/picoclaw && cd picoclaw && ./scripts/apply-patches.sh && cd vendor/picoclaw && make install
++> ```
++>
++> Includes: SOP framework, relaxed exec guard, subagent tool fix. See [PATCHES.md](https://github.com/paoloanzn/picoclaw/blob/main/PATCHES.md) for details.
++
++---
++
+ 🦐 PicoClaw is an ultra-lightweight personal AI Assistant inspired by [nanobot](https://github.com/HKUDS/nanobot), refactored from the ground up in Go through a self-bootstrapping process, where the AI agent itself drove the entire architectural migration and code optimization.
+ 
+ ⚡️ Runs on $10 hardware with <10MB RAM: That's 99% less memory than OpenClaw and 98% cheaper than a Mac mini!
+-- 
+2.39.5 (Apple Git-154)
+
