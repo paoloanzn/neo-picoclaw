@@ -48,6 +48,8 @@ jobs:
         if: steps.check.outputs.patch_count != '0'
         run: |
           cd vendor/picoclaw
+          git config user.name "picoclaw-ci"
+          git config user.email "ci@picoclaw.dev"
           PASS=0
           FAIL=0
           for p in ../../patches/*.patch; do

@@ -50,6 +50,11 @@ git clone --depth 1 --branch "$TAG" "$UPSTREAM_REPO" "$BUILD_DIR"
 
 # Apply all patches in lexicographic order
 cd "$BUILD_DIR"
+
+# Configure git identity for git-am (required in CI environments)
+git config user.name "picoclaw-ci"
+git config user.email "ci@picoclaw.dev"
+
 APPLIED=0
 FAILED=0
 

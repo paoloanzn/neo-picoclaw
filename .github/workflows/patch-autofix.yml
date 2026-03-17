@@ -53,6 +53,8 @@ jobs:
         id: apply
         run: |
           cd vendor/picoclaw
+          git config user.name "picoclaw-ci"
+          git config user.email "ci@picoclaw.dev"
           FAILED=""
           PASSED=""
           for p in ../../patches/*.patch; do
@@ -101,6 +103,8 @@ jobs:
       - name: Create PR (clean upgrade)
         if: steps.apply.outputs.all_passed == 'true'
         run: |
+          git config user.name "picoclaw-ci"
+          git config user.email "ci@picoclaw.dev"
           BRANCH="auto/upgrade-${{ env.NEW_TAG }}"
           git checkout -b "$BRANCH"
           git add UPSTREAM.conf
@@ -179,6 +183,8 @@ jobs:
         id: validate
         run: |
           cd vendor/picoclaw
+          git config user.name "picoclaw-ci"
+          git config user.email "ci@picoclaw.dev"
           git reset --hard ${{ env.NEW_TAG }}
 
           ALL_OK=true
@@ -213,6 +219,8 @@ jobs:
       - name: Create PR (with regenerated patches)
         if: steps.apply.outputs.all_passed == 'false'
         run: |
+          git config user.name "picoclaw-ci"
+          git config user.email "ci@picoclaw.dev"
           BRANCH="auto/upgrade-${{ env.NEW_TAG }}"
           git checkout -b "$BRANCH"
           git add patches/ UPSTREAM.conf
