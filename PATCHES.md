@@ -42,3 +42,10 @@
 - **Upstream PR:** None (custom fork maintenance infrastructure)
 - **Risk:** LOW — additive CI workflows and scripts only. No application code changed. Requires `ANTHROPIC_API_KEY` secret in GitHub Actions.
 - **Added:** 2026-03-17
+
+## 004-fix-subagent-tools
+- **Purpose:** Fix critical bug where subagents cannot use any tools. `SubagentManager` was initialized with an empty `ToolRegistry` and `SetTools()` was never called after the multi-agent refactor, so all subagent tool invocations returned `"tool not found"`. Fix adds `ToolRegistry.Clone()` method and wires it into `registerSharedTools()` to propagate file, exec, web, and other tools to subagents while excluding spawn/spawn_status (preventing recursive spawning).
+- **Files:** `pkg/tools/registry.go`, `pkg/tools/registry_test.go`, `pkg/agent/loop.go`
+- **Upstream PR:** Likely upstreamable — this is a clear regression fix
+- **Risk:** LOW — single-line wiring fix plus defensive Clone helper. No behavioral change for existing tools. 3 new tests added.
+- **Added:** 2026-03-17

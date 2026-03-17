@@ -1,0 +1,155 @@
+From a9288db3102ccc86e8704d1809560cf919057380 Mon Sep 17 00:00:00 2001
+From: paoloanzn <paolo@gladium.ai>
+Date: Tue, 17 Mar 2026 18:48:17 +0100
+Subject: [PATCH] fix(tools): propagate tool registry to subagents via Clone
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SubagentManager was created with an empty ToolRegistry and SetTools()
+was never called, causing all subagent tool invocations to fail with
+"tool not found". This was a regression from the multi-agent refactor.
+
+Fix: clone the parent agent's tool registry into the subagent manager
+after creation but before spawn/spawn_status registration — giving
+subagents access to file, exec, web, and other tools while preventing
+recursive subagent spawning.
+
+- Add ToolRegistry.Clone() for independent shallow copies
+- Call subagentManager.SetTools(agent.Tools.Clone()) in registerSharedTools
+- Add tests for Clone isolation, empty clone, and hidden tool state
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ pkg/agent/loop.go          |  5 +++
+ pkg/tools/registry.go      | 21 ++++++++++++
+ pkg/tools/registry_test.go | 65 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 91 insertions(+)
+
+diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
+index 00c9d91..42806a0 100644
+--- a/pkg/agent/loop.go
++++ b/pkg/agent/loop.go
+@@ -239,6 +239,11 @@ func registerSharedTools(
+ 		if (spawnEnabled || spawnStatusEnabled) && cfg.Tools.IsToolEnabled("subagent") {
+ 			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
+ 			subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
++			// Clone the parent's tool registry so subagents can use all
++			// tools registered so far (file, web, etc.) but NOT spawn/
++			// spawn_status which are added below — preventing recursive
++			// subagent spawning.
++			subagentManager.SetTools(agent.Tools.Clone())
+ 			if spawnEnabled {
+ 				spawnTool := tools.NewSpawnTool(subagentManager)
+ 				currentAgentID := agentID
+diff --git a/pkg/tools/registry.go b/pkg/tools/registry.go
+index 0635f47..74319d7 100644
+--- a/pkg/tools/registry.go
++++ b/pkg/tools/registry.go
+@@ -303,6 +303,27 @@ func (r *ToolRegistry) List() []string {
+ 	return r.sortedToolNames()
+ }
+ 
++// Clone creates an independent copy of the registry containing the same tool
++// entries (shallow copy of each ToolEntry). This is used to give subagents a
++// snapshot of the parent agent's tools without sharing the same registry —
++// tools registered on the parent after cloning (e.g. spawn, spawn_status)
++// will NOT be visible to the clone, preventing recursive subagent spawning.
++func (r *ToolRegistry) Clone() *ToolRegistry {
++	r.mu.RLock()
++	defer r.mu.RUnlock()
++	clone := &ToolRegistry{
++		tools: make(map[string]*ToolEntry, len(r.tools)),
++	}
++	for name, entry := range r.tools {
++		clone.tools[name] = &ToolEntry{
++			Tool:   entry.Tool,
++			IsCore: entry.IsCore,
++			TTL:    entry.TTL,
++		}
++	}
++	return clone
++}
++
+ // Count returns the number of registered tools.
+ func (r *ToolRegistry) Count() int {
+ 	r.mu.RLock()
+diff --git a/pkg/tools/registry_test.go b/pkg/tools/registry_test.go
+index 92d7d5a..b3162ae 100644
+--- a/pkg/tools/registry_test.go
++++ b/pkg/tools/registry_test.go
+@@ -335,6 +335,71 @@ func TestToolToSchema(t *testing.T) {
+ 	}
+ }
+ 
++func TestToolRegistry_Clone(t *testing.T) {
++	r := NewToolRegistry()
++	r.Register(newMockTool("read_file", "reads files"))
++	r.Register(newMockTool("exec", "runs commands"))
++	r.Register(newMockTool("web_search", "searches the web"))
++
++	clone := r.Clone()
++
++	// Clone should have the same tools
++	if clone.Count() != 3 {
++		t.Errorf("expected clone to have 3 tools, got %d", clone.Count())
++	}
++	for _, name := range []string{"read_file", "exec", "web_search"} {
++		if _, ok := clone.Get(name); !ok {
++			t.Errorf("expected clone to have tool %q", name)
++		}
++	}
++
++	// Registering on parent should NOT affect clone
++	r.Register(newMockTool("spawn", "spawns subagent"))
++	if r.Count() != 4 {
++		t.Errorf("expected parent to have 4 tools, got %d", r.Count())
++	}
++	if clone.Count() != 3 {
++		t.Errorf("expected clone to still have 3 tools after parent mutation, got %d", clone.Count())
++	}
++	if _, ok := clone.Get("spawn"); ok {
++		t.Error("expected clone NOT to have 'spawn' tool registered on parent after cloning")
++	}
++
++	// Registering on clone should NOT affect parent
++	clone.Register(newMockTool("custom", "custom tool"))
++	if clone.Count() != 4 {
++		t.Errorf("expected clone to have 4 tools, got %d", clone.Count())
++	}
++	if _, ok := r.Get("custom"); ok {
++		t.Error("expected parent NOT to have 'custom' tool registered on clone")
++	}
++}
++
++func TestToolRegistry_Clone_Empty(t *testing.T) {
++	r := NewToolRegistry()
++	clone := r.Clone()
++	if clone.Count() != 0 {
++		t.Errorf("expected empty clone, got count %d", clone.Count())
++	}
++}
++
++func TestToolRegistry_Clone_PreservesHiddenToolState(t *testing.T) {
++	r := NewToolRegistry()
++	r.RegisterHidden(newMockTool("mcp_tool", "dynamic MCP tool"))
++
++	clone := r.Clone()
++
++	// Hidden tools with TTL=0 should not be gettable (same behavior as parent)
++	if _, ok := clone.Get("mcp_tool"); ok {
++		t.Error("expected hidden tool with TTL=0 to be invisible in clone")
++	}
++
++	// But the entry should exist (count includes hidden tools)
++	if clone.Count() != 1 {
++		t.Errorf("expected clone count 1 (hidden entry exists), got %d", clone.Count())
++	}
++}
++
+ func TestToolRegistry_ConcurrentAccess(t *testing.T) {
+ 	r := NewToolRegistry()
+ 	var wg sync.WaitGroup
+-- 
+2.39.5 (Apple Git-154)
+
