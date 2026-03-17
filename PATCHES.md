@@ -35,3 +35,10 @@
 - **Upstream PR:** None (upstream may prefer the stricter defaults for safety-first deployments)
 - **Risk:** MEDIUM — modifies security-adjacent code. Reduces deny list from ~30 to ~24 patterns and widens path allowlist. Destructive/escalation patterns remain blocked. Tests updated and passing.
 - **Added:** 2026-03-17
+
+## 003-ci-autofix-agent-sdk
+- **Purpose:** Add fully automated cloud-based patch maintenance pipeline. When upstream releases a new tag, the auto-fix workflow tries all patches, invokes Claude Agent SDK to regenerate any that fail, validates the full sequence, and creates a PR — all without local CLI or manual intervention. Replaces the local `ai-regenerate-patch.sh` approach with a headless CI-compatible Node.js script. Also updates `upstream-watch.yml` to trigger the new auto-fix pipeline instead of the basic `patch-ci.yml`.
+- **Files:** `.github/workflows/patch-autofix.yml`, `.github/workflows/upstream-watch.yml`, `scripts/ai-regenerate-patch-ci.mjs`, `scripts/package.json`
+- **Upstream PR:** None (custom fork maintenance infrastructure)
+- **Risk:** LOW — additive CI workflows and scripts only. No application code changed. Requires `ANTHROPIC_API_KEY` secret in GitHub Actions.
+- **Added:** 2026-03-17

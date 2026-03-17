@@ -1,0 +1,557 @@
+From 15fba37da84819902e881a28b0673c06918c07a8 Mon Sep 17 00:00:00 2001
+From: paoloanzn <paolo@gladium.ai>
+Date: Tue, 17 Mar 2026 18:12:53 +0100
+Subject: [PATCH] feat(ci): add AI-powered patch auto-fix pipeline with Claude
+ Agent SDK
+
+Add cloud-based automated patch regeneration for upstream upgrades:
+
+- patch-autofix.yml: full pipeline that tries patches against new tag,
+  invokes Claude Agent SDK to regenerate failures, validates, and creates PR
+- ai-regenerate-patch-ci.mjs: Node.js script using Agent SDK for headless
+  CI patch regeneration (replaces CLI-based approach)
+- scripts/package.json: declares @anthropic-ai/claude-agent-sdk dependency
+- upstream-watch.yml: now triggers patch-autofix.yml instead of patch-ci.yml
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ .github/workflows/patch-autofix.yml  | 263 +++++++++++++++++++++++++++
+ .github/workflows/upstream-watch.yml |  16 +-
+ scripts/ai-regenerate-patch-ci.mjs   | 203 +++++++++++++++++++++
+ scripts/package.json                 |   8 +
+ 4 files changed, 482 insertions(+), 8 deletions(-)
+ create mode 100644 .github/workflows/patch-autofix.yml
+ create mode 100644 scripts/ai-regenerate-patch-ci.mjs
+ create mode 100644 scripts/package.json
+
+diff --git a/.github/workflows/patch-autofix.yml b/.github/workflows/patch-autofix.yml
+new file mode 100644
+index 0000000..f52626d
+--- /dev/null
++++ b/.github/workflows/patch-autofix.yml
+@@ -0,0 +1,263 @@
++name: Auto-Fix Patches
++
++on:
++  # Triggered by upstream-watch when a new release is detected
++  workflow_dispatch:
++    inputs:
++      new_tag:
++        description: 'New upstream tag to upgrade to'
++        required: true
++  # Can also be called by other workflows
++  workflow_call:
++    inputs:
++      new_tag:
++        description: 'New upstream tag to upgrade to'
++        required: true
++        type: string
++
++jobs:
++  autofix:
++    runs-on: ubuntu-latest
++    permissions:
++      contents: write
++      pull-requests: write
++      issues: write
++
++    steps:
++      - uses: actions/checkout@v4
++
++      - name: Read current config
++        run: |
++          source UPSTREAM.conf
++          echo "OLD_TAG=$UPSTREAM_TAG" >> $GITHUB_ENV
++          echo "UPSTREAM_REPO=$UPSTREAM_REPO" >> $GITHUB_ENV
++          echo "NEW_TAG=${{ inputs.new_tag }}" >> $GITHUB_ENV
++
++      - name: Check for patches
++        id: check
++        run: |
++          COUNT=$(find patches -name '*.patch' 2>/dev/null | wc -l | tr -d ' ')
++          echo "patch_count=$COUNT" >> $GITHUB_OUTPUT
++          if [[ "$COUNT" -eq 0 ]]; then
++            echo "No patches found — nothing to auto-fix."
++          fi
++
++      - name: Clone upstream at new tag
++        if: steps.check.outputs.patch_count != '0'
++        run: |
++          git clone --depth 50 --branch ${{ env.NEW_TAG }} \
++            ${{ env.UPSTREAM_REPO }} vendor/picoclaw
++
++      - name: Try applying all patches
++        if: steps.check.outputs.patch_count != '0'
++        id: apply
++        run: |
++          cd vendor/picoclaw
++          FAILED=""
++          PASSED=""
++          for p in ../../patches/*.patch; do
++            NAME="$(basename "$p")"
++            if git am --3way "$p" 2>/dev/null; then
++              echo "OK: $NAME"
++              PASSED="$PASSED $NAME"
++            else
++              echo "FAIL: $NAME"
++              FAILED="$FAILED $NAME"
++              git am --abort 2>/dev/null || true
++            fi
++            # Reset for next independent test
++            git reset --hard ${{ env.NEW_TAG }} 2>/dev/null
++          done
++
++          echo "failed_patches=$FAILED" >> $GITHUB_OUTPUT
++          echo "passed_patches=$PASSED" >> $GITHUB_OUTPUT
++
++          if [[ -z "$FAILED" ]]; then
++            echo "all_passed=true" >> $GITHUB_OUTPUT
++            echo ""
++            echo "All patches apply cleanly to ${{ env.NEW_TAG }}!"
++          else
++            echo "all_passed=false" >> $GITHUB_OUTPUT
++            echo ""
++            echo "Failed patches:$FAILED"
++          fi
++
++      # --- Fast path: all patches apply, just update UPSTREAM.conf ---
++
++      - name: Update UPSTREAM.conf (all passed)
++        if: steps.apply.outputs.all_passed == 'true'
++        run: |
++          NEW_SHA=$(git ls-remote ${{ env.UPSTREAM_REPO }} \
++            "refs/tags/${{ env.NEW_TAG }}" | head -1 | awk '{print $1}')
++          cat > UPSTREAM.conf <<EOF
++          # Upstream configuration — source of truth for the base version
++          UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
++          UPSTREAM_TAG="${{ env.NEW_TAG }}"
++          UPSTREAM_SHA="$NEW_SHA"
++          EOF
++          # Remove leading whitespace from heredoc
++          sed -i 's/^          //' UPSTREAM.conf
++
++      - name: Create PR (clean upgrade)
++        if: steps.apply.outputs.all_passed == 'true'
++        run: |
++          BRANCH="auto/upgrade-${{ env.NEW_TAG }}"
++          git checkout -b "$BRANCH"
++          git add UPSTREAM.conf
++          git commit -m "chore: upgrade upstream to ${{ env.NEW_TAG }}
++
++          All patches apply cleanly — no regeneration needed.
++
++          Patches validated:${{ steps.apply.outputs.passed_patches }}"
++          git push origin "$BRANCH"
++
++          gh pr create \
++            --title "Upgrade to upstream ${{ env.NEW_TAG }}" \
++            --label "upstream-upgrade" \
++            --body "$(cat <<'BODY'
++          ## Summary
++          - Upstream upgraded from `${{ env.OLD_TAG }}` to `${{ env.NEW_TAG }}`
++          - All patches apply cleanly — no AI regeneration was needed
++          - `UPSTREAM.conf` updated to new tag
++
++          ## Patches validated
++          ${{ steps.apply.outputs.passed_patches }}
++
++          ---
++          _Auto-generated by patch-autofix.yml_
++          BODY
++          )"
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
++
++      # --- Slow path: some patches failed, invoke AI regeneration ---
++
++      - name: Setup Node.js
++        if: steps.apply.outputs.all_passed == 'false'
++        uses: actions/setup-node@v4
++        with:
++          node-version: '20'
++
++      - name: Install Agent SDK
++        if: steps.apply.outputs.all_passed == 'false'
++        run: cd scripts && npm ci
++
++      - name: AI-regenerate failed patches
++        if: steps.apply.outputs.all_passed == 'false'
++        run: |
++          REGEN_OK=""
++          REGEN_FAIL=""
++
++          for PATCH_NAME in ${{ steps.apply.outputs.failed_patches }}; do
++            echo ""
++            echo "========================================="
++            echo "Regenerating: $PATCH_NAME"
++            echo "========================================="
++
++            # Reset vendor to clean state
++            cd vendor/picoclaw
++            git reset --hard ${{ env.NEW_TAG }}
++            cd ../..
++
++            if node scripts/ai-regenerate-patch-ci.mjs \
++              "patches/$PATCH_NAME" "${{ env.OLD_TAG }}" "${{ env.NEW_TAG }}"; then
++              echo "OK: $PATCH_NAME regenerated successfully"
++              REGEN_OK="$REGEN_OK $PATCH_NAME"
++            else
++              echo "FAIL: $PATCH_NAME could not be regenerated"
++              REGEN_FAIL="$REGEN_FAIL $PATCH_NAME"
++            fi
++          done
++
++          echo "regen_ok=$REGEN_OK" >> $GITHUB_ENV
++          echo "regen_fail=$REGEN_FAIL" >> $GITHUB_ENV
++        env:
++          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
++
++      - name: Validate all patches apply after regeneration
++        if: steps.apply.outputs.all_passed == 'false'
++        id: validate
++        run: |
++          cd vendor/picoclaw
++          git reset --hard ${{ env.NEW_TAG }}
++
++          ALL_OK=true
++          for p in ../../patches/*.patch; do
++            NAME="$(basename "$p")"
++            echo "Applying: $NAME"
++            if git am --3way "$p"; then
++              echo "  OK"
++            else
++              echo "  FAIL (even after regeneration)"
++              git am --abort 2>/dev/null || true
++              ALL_OK=false
++              break
++            fi
++          done
++
++          echo "validation_passed=$ALL_OK" >> $GITHUB_OUTPUT
++
++      - name: Update UPSTREAM.conf
++        if: steps.apply.outputs.all_passed == 'false'
++        run: |
++          NEW_SHA=$(git ls-remote ${{ env.UPSTREAM_REPO }} \
++            "refs/tags/${{ env.NEW_TAG }}" | head -1 | awk '{print $1}')
++          cat > UPSTREAM.conf <<EOF
++          # Upstream configuration — source of truth for the base version
++          UPSTREAM_REPO="${{ env.UPSTREAM_REPO }}"
++          UPSTREAM_TAG="${{ env.NEW_TAG }}"
++          UPSTREAM_SHA="$NEW_SHA"
++          EOF
++          sed -i 's/^          //' UPSTREAM.conf
++
++      - name: Create PR (with regenerated patches)
++        if: steps.apply.outputs.all_passed == 'false'
++        run: |
++          BRANCH="auto/upgrade-${{ env.NEW_TAG }}"
++          git checkout -b "$BRANCH"
++          git add patches/ UPSTREAM.conf
++          git commit -m "chore: upgrade to upstream ${{ env.NEW_TAG }} with AI-regenerated patches
++
++          Patches regenerated by Claude Agent SDK.
++          Validation: ${{ steps.validate.outputs.validation_passed == 'true' && 'all patches apply' || 'some patches need manual review' }}"
++          git push origin "$BRANCH"
++
++          LABELS="upstream-upgrade,ai-generated"
++          if [[ "${{ steps.validate.outputs.validation_passed }}" != "true" ]]; then
++            LABELS="$LABELS,needs-review"
++          fi
++          if [[ -n "${{ env.regen_fail }}" ]]; then
++            LABELS="$LABELS,needs-review"
++          fi
++
++          gh pr create \
++            --title "Upgrade to upstream ${{ env.NEW_TAG }} (AI-regenerated patches)" \
++            --label "$LABELS" \
++            --body "$(cat <<BODY
++          ## Summary
++          - Upstream upgraded from \`${{ env.OLD_TAG }}\` to \`${{ env.NEW_TAG }}\`
++          - Some patches required AI regeneration using Claude Agent SDK
++
++          ## Patch Status
++
++          **Already applied cleanly:**
++          ${{ steps.apply.outputs.passed_patches || '(none)' }}
++
++          **AI-regenerated successfully:**
++          ${{ env.regen_ok || '(none)' }}
++
++          **Failed (needs manual review):**
++          ${{ env.regen_fail || '(none)' }}
++
++          ## Validation
++          Full patch sequence applies: **${{ steps.validate.outputs.validation_passed }}**
++
++          > Review the regenerated patch diffs carefully. AI regeneration preserves
++          > intent but may introduce subtle differences.
++
++          ---
++          _Auto-generated by patch-autofix.yml using Claude Agent SDK_
++          BODY
++          )"
++        env:
++          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+diff --git a/.github/workflows/upstream-watch.yml b/.github/workflows/upstream-watch.yml
+index 29f2ff9..6a50f4c 100644
+--- a/.github/workflows/upstream-watch.yml
++++ b/.github/workflows/upstream-watch.yml
+@@ -36,12 +36,12 @@ jobs:
+             echo "new_release=true" >> $GITHUB_OUTPUT
+           fi
+ 
+-      - name: Trigger patch validation against new tag
++      - name: Trigger auto-fix pipeline
+         if: steps.compare.outputs.new_release == 'true'
+         run: |
+-          gh workflow run patch-ci.yml \
+-            -f upstream_tag="$LATEST"
+-          echo "Triggered patch-ci.yml with upstream_tag=$LATEST"
++          gh workflow run patch-autofix.yml \
++            -f new_tag="$LATEST"
++          echo "Triggered patch-autofix.yml with new_tag=$LATEST"
+         env:
+           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+@@ -67,10 +67,10 @@ jobs:
+ 
+           ## Next steps
+ 
+-          1. Wait for the patch-ci workflow to complete (auto-triggered)
+-          2. If patches apply cleanly, run: \`./scripts/upgrade-upstream.sh $LATEST\`
+-          3. If patches fail, regenerate with: \`./scripts/ai-regenerate-patch.sh <patch> $CURRENT $LATEST\`
+-          4. Review, test, and merge
++          1. The auto-fix pipeline has been triggered (patch-autofix.yml)
++          2. If all patches apply cleanly, a PR will be created automatically
++          3. If patches fail, AI regeneration via Claude Agent SDK will be attempted
++          4. Review the auto-generated PR when ready
+ 
+           _Auto-generated by upstream-watch.yml_
+           EOF
+diff --git a/scripts/ai-regenerate-patch-ci.mjs b/scripts/ai-regenerate-patch-ci.mjs
+new file mode 100644
+index 0000000..4b9c7d4
+--- /dev/null
++++ b/scripts/ai-regenerate-patch-ci.mjs
+@@ -0,0 +1,203 @@
++#!/usr/bin/env node
++/**
++ * ai-regenerate-patch-ci.mjs — CI-ready patch regeneration using Claude Agent SDK.
++ *
++ * Usage:
++ *   node scripts/ai-regenerate-patch-ci.mjs <failed_patch> <old_tag> <new_tag>
++ *
++ * Environment:
++ *   ANTHROPIC_API_KEY — required, set as a GitHub Actions secret
++ *
++ * This script is the CI equivalent of scripts/ai-regenerate-patch.sh but uses
++ * the Claude Agent SDK instead of the Claude CLI, making it runnable in GitHub
++ * Actions without installing the CLI.
++ */
++
++import { query } from "@anthropic-ai/claude-agent-sdk";
++import { readFileSync, writeFileSync, existsSync } from "fs";
++import { execSync } from "child_process";
++import { basename, resolve } from "path";
++
++const ROOT_DIR = resolve(import.meta.dirname, "..");
++
++function run(cmd, opts = {}) {
++  try {
++    return execSync(cmd, { encoding: "utf-8", cwd: ROOT_DIR, ...opts }).trim();
++  } catch (e) {
++    return e.stdout?.trim?.() ?? "";
++  }
++}
++
++async function main() {
++  const [failedPatch, oldTag, newTag] = process.argv.slice(2);
++
++  if (!failedPatch || !oldTag || !newTag) {
++    console.error("Usage: ai-regenerate-patch-ci.mjs <failed_patch> <old_tag> <new_tag>");
++    process.exit(1);
++  }
++
++  if (!process.env.ANTHROPIC_API_KEY) {
++    console.error("ERROR: ANTHROPIC_API_KEY environment variable is required.");
++    process.exit(1);
++  }
++
++  const patchPath = resolve(ROOT_DIR, failedPatch);
++  if (!existsSync(patchPath)) {
++    console.error(`ERROR: Patch file not found: ${failedPatch}`);
++    process.exit(1);
++  }
++
++  const buildDir = resolve(ROOT_DIR, "vendor/picoclaw");
++  if (!existsSync(resolve(buildDir, ".git"))) {
++    console.error("ERROR: vendor/picoclaw not found. Clone upstream first.");
++    process.exit(1);
++  }
++
++  const patchName = basename(failedPatch, ".patch");
++  const patchContent = readFileSync(patchPath, "utf-8");
++
++  console.log(`=== AI Patch Regeneration (CI) ===`);
++  console.log(`Patch:   ${patchName}`);
++  console.log(`Upgrade: ${oldTag} -> ${newTag}`);
++  console.log();
++
++  // Extract patch description from PATCHES.md
++  const patchesMd = readFileSync(resolve(ROOT_DIR, "PATCHES.md"), "utf-8");
++  const descMatch = patchesMd.match(
++    new RegExp(`## ${patchName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[\\s\\S]*?(?=\\n## |$)`)
++  );
++  const patchDesc = descMatch ? descMatch[0] : "(No description available)";
++
++  // Get affected files from the patch
++  const affectedFiles = [...patchContent.matchAll(/^diff --git a\/(.+?) b\//gm)]
++    .map((m) => m[1]);
++
++  console.log("Affected files:");
++  affectedFiles.forEach((f) => console.log(`  ${f}`));
++  console.log();
++
++  // Get upstream diff between tags for affected files
++  let upstreamDiff = "";
++  try {
++    run(`git fetch --depth 50 origin refs/tags/${oldTag}:refs/tags/${oldTag}`, { cwd: buildDir });
++  } catch { /* may already exist */ }
++
++  if (affectedFiles.length > 0) {
++    upstreamDiff = run(
++      `git diff ${oldTag}..${newTag} -- ${affectedFiles.join(" ")}`,
++      { cwd: buildDir }
++    );
++  }
++
++  // Read current file contents at new tag
++  let fileContents = "";
++  for (const f of affectedFiles) {
++    const filePath = resolve(buildDir, f);
++    if (existsSync(filePath)) {
++      fileContents += `\n=== ${f} ===\n${readFileSync(filePath, "utf-8")}\n`;
++    }
++  }
++
++  // Build the prompt
++  const prompt = `You are a git patch maintenance agent. A patch failed to apply
++after an upstream upgrade.
++
++CONTEXT:
++- Old upstream version: ${oldTag}
++- New upstream version: ${newTag}
++- Failed patch name: ${patchName}
++- Failed patch intent:
++${patchDesc}
++
++RULES:
++1. NEVER change the patch's intent — only adapt its implementation
++2. Match the coding style of the upstream project
++3. If a function was renamed, update the patch to use the new name
++4. If the file was restructured, find the equivalent location
++5. If the logic the patch modifies was fundamentally rewritten,
++   respond with NEEDS_MANUAL_REVIEW and explain why
++6. Output valid git format-patch format with correct line numbers
++7. Preserve the original commit author and message
++
++ORIGINAL PATCH:
++${patchContent}
++
++UPSTREAM CHANGES to affected files (${oldTag} -> ${newTag}):
++${upstreamDiff || "(Could not compute diff)"}
++
++NEW source files at ${newTag}:
++${fileContents || "(Could not read files)"}
++
++TASK: Regenerate the patch so it applies cleanly to ${newTag}
++while preserving the original intent. Output ONLY the new
++.patch file content in git format-patch format.
++Keep the same commit message. Adapt line numbers and context.`;
++
++  console.log("Invoking Claude Agent SDK for patch regeneration...");
++  console.log();
++
++  // Call Claude via Agent SDK
++  let result = "";
++  for await (const message of query({
++    prompt,
++    options: {
++      allowedTools: [],
++    },
++  })) {
++    if ("result" in message) {
++      result = message.result;
++    }
++  }
++
++  if (!result) {
++    console.error("ERROR: No response from Claude.");
++    process.exit(1);
++  }
++
++  // Check if Claude flagged it for manual review
++  if (result.includes("NEEDS_MANUAL_REVIEW")) {
++    console.error("Claude flagged this patch for MANUAL REVIEW:");
++    console.error();
++    console.error(result);
++    process.exit(1);
++  }
++
++  // Extract the patch content from the response (it may be wrapped in markdown code fences)
++  let patchOutput = result;
++  const fenceMatch = result.match(/```(?:diff|patch)?\n([\s\S]*?)```/);
++  if (fenceMatch) {
++    patchOutput = fenceMatch[1];
++  }
++
++  // Write the regenerated patch
++  const newPatchPath = patchPath + ".new";
++  writeFileSync(newPatchPath, patchOutput);
++
++  // Validate the regenerated patch
++  console.log("Validating regenerated patch...");
++  run(`git checkout ${newTag}`, { cwd: buildDir });
++
++  try {
++    execSync(`git am --3way "${newPatchPath}"`, {
++      cwd: buildDir,
++      encoding: "utf-8",
++      stdio: "pipe",
++    });
++    console.log();
++    console.log("Regenerated patch applies cleanly!");
++    writeFileSync(patchPath, patchOutput);
++    console.log(`Updated: ${failedPatch}`);
++    run(`git checkout ${newTag}`, { cwd: buildDir });
++  } catch {
++    console.error();
++    console.error("AI-generated patch also failed to apply — needs manual review.");
++    console.error(`The attempted patch is at: ${newPatchPath}`);
++    run("git am --abort", { cwd: buildDir });
++    process.exit(1);
++  }
++}
++
++main().catch((err) => {
++  console.error("Fatal error:", err.message);
++  process.exit(1);
++});
+diff --git a/scripts/package.json b/scripts/package.json
+new file mode 100644
+index 0000000..ebff378
+--- /dev/null
++++ b/scripts/package.json
+@@ -0,0 +1,8 @@
++{
++  "name": "picoclaw-patch-scripts",
++  "private": true,
++  "type": "module",
++  "dependencies": {
++    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
++  }
++}
+-- 
+2.39.5 (Apple Git-154)
+
