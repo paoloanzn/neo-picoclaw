@@ -1,0 +1,80 @@
+From aa34cfca1de87fa33972ada19543cc8ab39171c7 Mon Sep 17 00:00:00 2001
+From: paoloanzn <paolo@gladium.ai>
+Date: Tue, 17 Mar 2026 17:31:12 +0100
+Subject: [PATCH] feat(agent): add SOP-driven execution framework to workspace
+ and system prompt
+
+Add SOPs (Standard Operating Procedures) as a first-class concept:
+
+- Add sops/ directory with README.md to the default workspace template,
+  so new installations include the SOP folder structure out of the box.
+- Add SOP instructions as rule #5 in the agent system prompt, making the
+  agent check for and follow relevant SOPs before executing any task.
+- Add SOPs path to the workspace directory listing in the identity block.
+
+This hardcodes SOP-aware behavior into the agent rather than relying on
+per-user memory.md configuration, ensuring consistent SOP-driven execution
+across all installations.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ pkg/agent/context.go     |  5 ++++-
+ workspace/sops/README.md | 22 ++++++++++++++++++++++
+ 2 files changed, 26 insertions(+), 1 deletion(-)
+ create mode 100644 workspace/sops/README.md
+
+diff --git a/pkg/agent/context.go b/pkg/agent/context.go
+index 830edf8..5d3ca99 100644
+--- a/pkg/agent/context.go
++++ b/pkg/agent/context.go
+@@ -94,6 +94,7 @@ Your workspace is at: %s
+ - Memory: %s/memory/MEMORY.md
+ - Daily Notes: %s/memory/YYYYMM/YYYYMMDD.md
+ - Skills: %s/skills/{skill-name}/SKILL.md
++- SOPs: %s/sops/
+ 
+ ## Important Rules
+ 
+@@ -105,8 +106,10 @@ Your workspace is at: %s
+ 
+ 4. **Context summaries** - Conversation summaries provided as context are approximate references only. They may be incomplete or outdated. Always defer to explicit user instructions over summary content.
+ 
++5. **SOPs (Standard Operating Procedures)** - Before executing any requested task, check %s/sops/ for a relevant SOP and follow it if found, unless the user explicitly says not to. When asked to create a new SOP, place it in %s/sops/ using the naming convention SOP-<topic>-v<major>.<minor>.md and follow the guidelines in %s/sops/README.md.
++
+ %s`,
+-		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
++		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
+ }
+ 
+ func (cb *ContextBuilder) getDiscoveryRule() string {
+diff --git a/workspace/sops/README.md b/workspace/sops/README.md
+new file mode 100644
+index 0000000..0f8208d
+--- /dev/null
++++ b/workspace/sops/README.md
+@@ -0,0 +1,22 @@
++# SOPs (Standard Operating Procedures)
++
++This folder contains task-specific SOP documents that define repeatable operational procedures.
++
++## How the agent uses SOPs
++- Before executing a requested task, the agent checks this folder for a relevant SOP and follows it if found.
++- Sub-agents spawned for delegated work will also read the relevant SOP before executing.
++- SOPs should be kept concise, actionable, and versioned/dated when helpful.
++
++## Naming convention
++- Use: `SOP-<topic>-v<major>.<minor>.md`
++  - Example: `SOP-release-checklist-v1.0.md`
++
++## Template
++Each SOP should typically include:
++1. **Purpose**
++2. **Scope / When to use**
++3. **Inputs**
++4. **Procedure (step-by-step)**
++5. **Outputs / Definition of done**
++6. **Edge cases / Safety checks**
++7. **Logging / Artifacts** (files created/updated)
+-- 
+2.39.5 (Apple Git-154)
+

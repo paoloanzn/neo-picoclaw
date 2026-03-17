@@ -22,4 +22,9 @@
 
 -->
 
-_No patches yet. Add entries here as patches are created._
+## 001-add-sop-framework
+- **Purpose:** Add SOP-driven execution as a first-class agent behavior. Includes the `sops/` directory with README.md in the default workspace template, and hardcodes SOP lookup instructions (rule #5) into the agent system prompt. This replaces the need to manually configure SOP behavior via memory.md.
+- **Files:** `pkg/agent/context.go`, `workspace/sops/README.md`
+- **Upstream PR:** None (custom operational framework unlikely to be accepted upstream)
+- **Risk:** LOW — additive only. Adds one line to workspace listing, one new rule to system prompt, and one new template file. No existing behavior changed.
+- **Added:** 2026-03-17
