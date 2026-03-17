@@ -94,6 +94,7 @@ Your workspace is at: %s
 - Memory: %s/memory/MEMORY.md
 - Daily Notes: %s/memory/YYYYMM/YYYYMMDD.md
 - Skills: %s/skills/{skill-name}/SKILL.md
+- SOPs: %s/sops/
 
 ## Important Rules
 
@@ -105,8 +106,10 @@ Your workspace is at: %s
 
 4. **Context summaries** - Conversation summaries provided as context are approximate references only. They may be incomplete or outdated. Always defer to explicit user instructions over summary content.
 
+5. **SOPs (Standard Operating Procedures)** - Before executing any requested task, check %s/sops/ for a relevant SOP and follow it if found, unless the user explicitly says not to. When asked to create a new SOP, place it in %s/sops/ using the naming convention SOP-<topic>-v<major>.<minor>.md and follow the guidelines in %s/sops/README.md.
+
 %s`,
-		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
+		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
 }
 
 func (cb *ContextBuilder) getDiscoveryRule() string {
