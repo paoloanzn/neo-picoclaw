@@ -1,0 +1,88 @@
+name: Validate Patches
+
+on:
+  push:
+    paths:
+      - 'patches/**'
+      - 'UPSTREAM.conf'
+  pull_request:
+    paths:
+      - 'patches/**'
+      - 'UPSTREAM.conf'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Override upstream tag to test against'
+        required: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve target tag
+        run: |
+          source UPSTREAM.conf
+          TAG="${{ inputs.upstream_tag || '' }}"
+          if [[ -z "$TAG" ]]; then
+            TAG="$UPSTREAM_TAG"
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "UPSTREAM_REPO=$UPSTREAM_REPO" >> $GITHUB_ENV
+
+      - name: Check for patches
+        id: check
+        run: |
+          COUNT=$(find patches -name '*.patch' 2>/dev/null | wc -l | tr -d ' ')
+          echo "patch_count=$COUNT" >> $GITHUB_OUTPUT
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "No patches found — skipping validation."
+          fi
+
+      - name: Clone upstream at target tag
+        if: steps.check.outputs.patch_count != '0'
+        run: git clone --depth 1 --branch ${{ env.TAG }} ${{ env.UPSTREAM_REPO }} vendor/picoclaw
+
+      - name: Apply patches
+        if: steps.check.outputs.patch_count != '0'
+        run: |
+          cd vendor/picoclaw
+          PASS=0
+          FAIL=0
+          for p in ../../patches/*.patch; do
+            NAME="$(basename "$p")"
+            echo "::group::Applying $NAME"
+            if git am --3way "$p"; then
+              echo "OK: $NAME"
+              PASS=$((PASS + 1))
+            else
+              echo "::error::Patch failed: $NAME"
+              git am --abort || true
+              FAIL=$((FAIL + 1))
+            fi
+            echo "::endgroup::"
+          done
+          echo ""
+          echo "Results: $PASS passed, $FAIL failed"
+          if [[ "$FAIL" -gt 0 ]]; then
+            exit 1
+          fi
+
+      - name: Build upstream with patches (Go)
+        if: steps.check.outputs.patch_count != '0'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: vendor/picoclaw/go.mod
+
+      - name: Verify build
+        if: steps.check.outputs.patch_count != '0'
+        run: |
+          cd vendor/picoclaw
+          go build ./...
+
+      - name: Run tests
+        if: steps.check.outputs.patch_count != '0'
+        run: |
+          cd vendor/picoclaw
+          go test ./... -short -count=1

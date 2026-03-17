@@ -45,6 +45,9 @@ docs/plans/
 .vscode/
 .idea/
 
+# Patch system — built at CI/install time
+vendor/picoclaw/
+
 # Added by goreleaser init:
 dist/
 *.vite/
