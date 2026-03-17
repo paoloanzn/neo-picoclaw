@@ -39,14 +39,19 @@ jobs:
         with:
           go-version-file: vendor/picoclaw/go.mod
 
-      - name: Copy custom GoReleaser config
-        run: cp .goreleaser-custom.yaml vendor/picoclaw/.goreleaser.yaml
-
-      - name: Create tag on patched source
+      - name: Prepare patched source for release
         working-directory: vendor/picoclaw
         env:
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
+          # Copy our simplified GoReleaser config (CLI-only, no Docker/signing)
+          cp ../../.goreleaser-custom.yaml .goreleaser.yaml
+
+          # Commit so the git tree is clean for GoReleaser
+          git add .goreleaser.yaml
+          git commit -m "build: use custom fork goreleaser config"
+
+          # Tag the final state
           git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
 
       - name: Run GoReleaser
@@ -54,7 +59,7 @@ jobs:
         with:
           distribution: goreleaser
           version: ~> v2
-          args: release --clean
+          args: release --clean --skip=publish
           workdir: vendor/picoclaw
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
