@@ -151,7 +151,7 @@ func TestShellTool_DangerousCommand(t *testing.T) {
 	}
 }
 
-func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
+func TestShellTool_DangerousCommand_DockerExecBlocked(t *testing.T) {
 	tool, err := NewExecTool("", false)
 	if err != nil {
 		t.Errorf("unable to configure exec tool: %s", err)
@@ -159,12 +159,12 @@ func TestShellTool_DangerousCommand_KillBlocked(t *testing.T) {
 
 	ctx := context.Background()
 	args := map[string]any{
-		"command": "kill 12345",
+		"command": "docker exec mycontainer ls",
 	}
 
 	result := tool.Execute(ctx, args)
 	if !result.IsError {
-		t.Errorf("Expected kill command to be blocked")
+		t.Errorf("Expected docker exec command to be blocked")
 	}
 	if !strings.Contains(result.ForLLM, "blocked") && !strings.Contains(result.ForUser, "blocked") {
 		t.Errorf("Expected blocked message, got ForLLM: %s, ForUser: %s", result.ForLLM, result.ForUser)
@@ -496,7 +496,7 @@ func TestShellTool_CustomAllowPatterns(t *testing.T) {
 		Tools: config.ToolsConfig{
 			Exec: config.ExecConfig{
 				EnableDenyPatterns:  true,
-				CustomAllowPatterns: []string{`\bgit\s+push\s+origin\b`},
+				CustomAllowPatterns: []string{`\bsudo\s+apt\s+update\b`},
 			},
 		},
 	}
@@ -506,20 +506,76 @@ func TestShellTool_CustomAllowPatterns(t *testing.T) {
 		t.Fatalf("unable to configure exec tool: %s", err)
 	}
 
-	// "git push origin main" should be allowed by custom allow pattern.
+	// "sudo apt update" should be allowed by custom allow pattern.
 	result := tool.Execute(context.Background(), map[string]any{
-		"command": "git push origin main",
+		"command": "sudo apt update",
 	})
 	if result.IsError && strings.Contains(result.ForLLM, "blocked") {
-		t.Errorf("custom allow pattern should exempt 'git push origin main', got: %s", result.ForLLM)
+		t.Errorf("custom allow pattern should exempt 'sudo apt update', got: %s", result.ForLLM)
 	}
 
-	// "git push upstream main" should still be blocked (does not match allow pattern).
+	// "sudo cat /etc/shadow" should still be blocked (does not match allow pattern).
 	result = tool.Execute(context.Background(), map[string]any{
-		"command": "git push upstream main",
+		"command": "sudo cat /etc/shadow",
 	})
 	if !result.IsError {
-		t.Errorf("'git push upstream main' should still be blocked by deny pattern")
+		t.Errorf("'sudo cat /etc/shadow' should still be blocked by deny pattern")
+	}
+}
+
+// TestShellTool_SystemPathsAllowed verifies that commands referencing system paths
+// (tools, binaries, libraries) are not blocked by workspace restriction.
+func TestShellTool_SystemPathsAllowed(t *testing.T) {
+	tmpDir := t.TempDir()
+	tool, err := NewExecTool(tmpDir, true)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	// These commands reference system paths outside the workspace but should be
+	// allowed because they use safe system path prefixes.
+	commands := []string{
+		"ls /usr/bin/env",
+		"/usr/bin/env echo hello",
+		"file /bin/sh",
+		"ls /opt/homebrew/bin/",
+		"cat /tmp/test.log",
+		"ls /proc/self/status",
+	}
+
+	for _, cmd := range commands {
+		result := tool.Execute(context.Background(), map[string]any{"command": cmd})
+		if result.IsError && strings.Contains(result.ForLLM, "path outside working dir") {
+			t.Errorf("system path should not be blocked by workspace check: %s\n  error: %s", cmd, result.ForLLM)
+		}
+	}
+}
+
+// TestShellTool_ShellFeaturesAllowed verifies that normal shell features (command
+// substitution, variable expansion, heredocs) are not blocked by deny patterns.
+func TestShellTool_ShellFeaturesAllowed(t *testing.T) {
+	tool, err := NewExecTool("", false)
+	if err != nil {
+		t.Fatalf("unable to configure exec tool: %s", err)
+	}
+
+	commands := []string{
+		"echo $(date)",
+		"echo ${HOME}",
+		"echo `whoami`",
+		"cat << EOF\nhello\nEOF",
+		"eval echo hello",
+		"git push origin main",
+		"ssh user@host ls",
+		"chmod 755 script.sh",
+		"kill -0 1234",
+	}
+
+	for _, cmd := range commands {
+		result := tool.Execute(context.Background(), map[string]any{"command": cmd})
+		if result.IsError && strings.Contains(result.ForLLM, "dangerous pattern") {
+			t.Errorf("normal shell/dev command should not be blocked: %s\n  error: %s", cmd, result.ForLLM)
+		}
 	}
 }
 

@@ -29,11 +29,21 @@ type ExecTool struct {
 }
 
 var (
+	// defaultDenyPatterns blocks genuinely dangerous commands: destructive file
+	// operations, disk wiping, system control, remote code execution, privilege
+	// escalation, and container escape.
+	//
+	// Normal shell features (command substitution, variable expansion, heredocs,
+	// eval, source) and standard dev tools (git push, ssh, chmod, kill) are
+	// intentionally NOT blocked — blocking them makes the exec tool unusable
+	// for real development work. Security for those operations is provided by
+	// the workspace restriction (working dir + file tool sandboxing) instead.
 	defaultDenyPatterns = []*regexp.Regexp{
+		// Destructive file operations
 		regexp.MustCompile(`\brm\s+-[rf]{1,2}\b`),
 		regexp.MustCompile(`\bdel\s+/[fq]\b`),
 		regexp.MustCompile(`\brmdir\s+/s\b`),
-		// Match disk wiping commands (must be followed by space/args)
+		// Disk wiping commands (must be followed by space/args)
 		regexp.MustCompile(
 			`\b(format|mkfs|diskpart)\b\s`,
 		),
@@ -42,41 +52,35 @@ var (
 		regexp.MustCompile(
 			`>\s*/dev/(sd[a-z]|hd[a-z]|vd[a-z]|xvd[a-z]|nvme\d|mmcblk\d|loop\d|dm-\d|md\d|sr\d|nbd\d)`,
 		),
+		// System control
 		regexp.MustCompile(`\b(shutdown|reboot|poweroff)\b`),
+		// Fork bomb
 		regexp.MustCompile(`:\(\)\s*\{.*\};\s*:`),
-		regexp.MustCompile(`\$\([^)]+\)`),
-		regexp.MustCompile(`\$\{[^}]+\}`),
-		regexp.MustCompile("`[^`]+`"),
+		// Pipe to shell interpreter
 		regexp.MustCompile(`\|\s*sh\b`),
 		regexp.MustCompile(`\|\s*bash\b`),
+		// Chained destructive commands
 		regexp.MustCompile(`;\s*rm\s+-[rf]`),
 		regexp.MustCompile(`&&\s*rm\s+-[rf]`),
 		regexp.MustCompile(`\|\|\s*rm\s+-[rf]`),
-		regexp.MustCompile(`<<\s*EOF`),
-		regexp.MustCompile(`\$\(\s*cat\s+`),
+		// Remote code injection via command substitution
 		regexp.MustCompile(`\$\(\s*curl\s+`),
 		regexp.MustCompile(`\$\(\s*wget\s+`),
-		regexp.MustCompile(`\$\(\s*which\s+`),
-		regexp.MustCompile(`\bsudo\b`),
-		regexp.MustCompile(`\bchmod\s+[0-7]{3,4}\b`),
-		regexp.MustCompile(`\bchown\b`),
-		regexp.MustCompile(`\bpkill\b`),
-		regexp.MustCompile(`\bkillall\b`),
-		regexp.MustCompile(`\bkill\b`),
+		// Remote code execution via pipe
 		regexp.MustCompile(`\bcurl\b.*\|\s*(sh|bash)`),
 		regexp.MustCompile(`\bwget\b.*\|\s*(sh|bash)`),
+		// Privilege escalation
+		regexp.MustCompile(`\bsudo\b`),
+		// Global package installation
 		regexp.MustCompile(`\bnpm\s+install\s+-g\b`),
 		regexp.MustCompile(`\bpip\s+install\s+--user\b`),
+		// System package management
 		regexp.MustCompile(`\bapt\s+(install|remove|purge)\b`),
 		regexp.MustCompile(`\byum\s+(install|remove)\b`),
 		regexp.MustCompile(`\bdnf\s+(install|remove)\b`),
+		// Container operations
 		regexp.MustCompile(`\bdocker\s+run\b`),
 		regexp.MustCompile(`\bdocker\s+exec\b`),
-		regexp.MustCompile(`\bgit\s+push\b`),
-		regexp.MustCompile(`\bgit\s+force\b`),
-		regexp.MustCompile(`\bssh\b.*@`),
-		regexp.MustCompile(`\beval\b`),
-		regexp.MustCompile(`\bsource\s+.*\.sh\b`),
 	}
 
 	// absolutePathPattern matches absolute file paths in commands (Unix and Windows).
@@ -94,7 +98,47 @@ var (
 		"/dev/stdout":  true,
 		"/dev/stderr":  true,
 	}
+
+	// safeSystemPrefixes are directory prefixes for system paths that commands
+	// legitimately reference (tools, binaries, libraries, temp files). Absolute
+	// paths under these prefixes are exempt from the workspace boundary check
+	// in guardCommand, so commands like "ls /usr/bin/" or "/usr/bin/env python3"
+	// work when workspace restriction is enabled.
+	safeSystemPrefixes = []string{
+		"/usr/",
+		"/bin/",
+		"/sbin/",
+		"/lib/",
+		"/lib64/",
+		"/opt/",
+		"/tmp/",
+		"/proc/",
+		"/sys/",
+		"/nix/",
+	}
 )
+
+func init() {
+	if runtime.GOOS == "darwin" {
+		safeSystemPrefixes = append(safeSystemPrefixes,
+			"/Applications/",
+			"/Library/",
+			"/System/",
+			"/private/",
+		)
+	}
+}
+
+// hasSafeSystemPrefix returns true if path starts with a known system directory
+// prefix that is safe to reference in commands regardless of workspace restriction.
+func hasSafeSystemPrefix(path string) bool {
+	for _, prefix := range safeSystemPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 func NewExecTool(workingDir string, restrict bool, allowPaths ...[]*regexp.Regexp) (*ExecTool, error) {
 	return NewExecToolWithConfig(workingDir, restrict, nil, allowPaths...)
@@ -425,6 +469,9 @@ func (t *ExecTool) guardCommand(command, cwd string) string {
 			}
 
 			if safePaths[p] {
+				continue
+			}
+			if hasSafeSystemPrefix(p) {
 				continue
 			}
 			if isAllowedPath(p, t.allowedPathPatterns) {
