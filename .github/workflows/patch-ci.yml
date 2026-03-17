@@ -81,6 +81,7 @@ jobs:
         if: steps.check.outputs.patch_count != '0'
         run: |
           cd vendor/picoclaw
+          go generate ./...
           go build ./...
 
       - name: Run tests
