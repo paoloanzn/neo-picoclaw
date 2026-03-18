@@ -1,6 +1,6 @@
-From aa6ce04abf38d603953a956318d81482276ab7b1 Mon Sep 17 00:00:00 2001
+From 6cbbc3f0996e6bf55682000933a79cdded149206 Mon Sep 17 00:00:00 2001
 From: picoclaw-ci <ci@picoclaw.dev>
-Date: Wed, 18 Mar 2026 13:04:48 +0100
+Date: Wed, 18 Mar 2026 13:16:17 +0100
 Subject: [PATCH] fix(tools): propagate tool registry to subagents via Clone
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -16,63 +16,18 @@ agent's tool registry, then call subagentManager.SetTools(agent.Tools.Clone())
 in registerSharedTools() — giving subagents access to file, exec, web,
 and other tools while preventing recursive subagent spawning.
 
-Also fix pre-existing build error in cron_test.go where SubscribeOutbound()
-was called but doesn't exist on MessageBus (replaced with OutboundChan()).
-
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ---
- pkg/agent/loop.go          | 156 ++++++++++++++++++++-----------------
- pkg/tools/cron_test.go     |  13 ++--
- pkg/tools/registry.go      |  22 ++++++
- pkg/tools/registry_test.go |  90 +++++++++++++++++++++
- 4 files changed, 204 insertions(+), 77 deletions(-)
+ pkg/agent/loop.go          |  5 +++
+ pkg/tools/registry.go      | 22 ++++++++++
+ pkg/tools/registry_test.go | 89 ++++++++++++++++++++++++++++++++++++++
+ 3 files changed, 116 insertions(+)
 
 diff --git a/pkg/agent/loop.go b/pkg/agent/loop.go
-index 8328c69..421acea 100644
+index 8328c69..05aa62e 100644
 --- a/pkg/agent/loop.go
 +++ b/pkg/agent/loop.go
-@@ -55,15 +55,17 @@ type AgentLoop struct {
- 
- // processOptions configures how a message is processed
- type processOptions struct {
--	SessionKey      string   // Session identifier for history/context
--	Channel         string   // Target channel for tool execution
--	ChatID          string   // Target chat ID for tool execution
--	UserMessage     string   // User message content (may include prefix)
--	Media           []string // media:// refs from inbound message
--	DefaultResponse string   // Response when LLM returns empty
--	EnableSummary   bool     // Whether to trigger summarization
--	SendResponse    bool     // Whether to send response via bus
--	NoHistory       bool     // If true, don't load session history (for heartbeat)
-+	SessionKey        string   // Session identifier for history/context
-+	Channel           string   // Target channel for tool execution
-+	ChatID            string   // Target chat ID for tool execution
-+	SenderID          string   // Current sender ID for dynamic context
-+	SenderDisplayName string   // Current sender display name for dynamic context
-+	UserMessage       string   // User message content (may include prefix)
-+	Media             []string // media:// refs from inbound message
-+	DefaultResponse   string   // Response when LLM returns empty
-+	EnableSummary     bool     // Whether to trigger summarization
-+	SendResponse      bool     // Whether to send response via bus
-+	NoHistory         bool     // If true, don't load session history (for heartbeat)
- }
- 
- const (
-@@ -159,7 +161,12 @@ func registerSharedTools(
- 			}
- 		}
- 		if cfg.Tools.IsToolEnabled("web_fetch") {
--			fetchTool, err := tools.NewWebFetchToolWithProxy(50000, cfg.Tools.Web.Proxy, cfg.Tools.Web.FetchLimitBytes)
-+			fetchTool, err := tools.NewWebFetchToolWithConfig(
-+				50000,
-+				cfg.Tools.Web.Proxy,
-+				cfg.Tools.Web.FetchLimitBytes,
-+				cfg.Tools.Web.PrivateHostWhitelist,
-+			)
- 			if err != nil {
- 				logger.ErrorCF("agent", "Failed to create web fetch tool", map[string]any{"error": err.Error()})
- 			} else {
-@@ -232,6 +239,11 @@ func registerSharedTools(
+@@ -232,6 +232,11 @@ func registerSharedTools(
  		if (spawnEnabled || spawnStatusEnabled) && cfg.Tools.IsToolEnabled("subagent") {
  			subagentManager := tools.NewSubagentManager(provider, agent.Model, agent.Workspace)
  			subagentManager.SetLLMOptions(agent.MaxTokens, agent.Temperature)
@@ -84,190 +39,6 @@ index 8328c69..421acea 100644
  			if spawnEnabled {
  				spawnTool := tools.NewSpawnTool(subagentManager)
  				currentAgentID := agentID
-@@ -260,67 +272,65 @@ func (al *AgentLoop) Run(ctx context.Context) error {
- 		select {
- 		case <-ctx.Done():
- 			return nil
--		default:
--			msg, ok := al.bus.ConsumeInbound(ctx)
-+		case msg, ok := <-al.bus.InboundChan():
- 			if !ok {
--				continue
-+				return nil
- 			}
--
- 			// Process message
--			func() {
--				// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
--				// Currently disabled because files are deleted before the LLM can access their content.
--				// defer func() {
--				// 	if al.mediaStore != nil && msg.MediaScope != "" {
--				// 		if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
--				// 			logger.WarnCF("agent", "Failed to release media", map[string]any{
--				// 				"scope": msg.MediaScope,
--				// 				"error": releaseErr.Error(),
--				// 			})
--				// 		}
--				// 	}
--				// }()
--
--				response, err := al.processMessage(ctx, msg)
--				if err != nil {
--					response = fmt.Sprintf("Error processing message: %v", err)
--				}
-+			// TODO: Re-enable media cleanup after inbound media is properly consumed by the agent.
-+			// Currently disabled because files are deleted before the LLM can access their content.
-+			// defer func() {
-+			// 	if al.mediaStore != nil && msg.MediaScope != "" {
-+			// 		if releaseErr := al.mediaStore.ReleaseAll(msg.MediaScope); releaseErr != nil {
-+			// 			logger.WarnCF("agent", "Failed to release media", map[string]any{
-+			// 				"scope": msg.MediaScope,
-+			// 				"error": releaseErr.Error(),
-+			// 			})
-+			// 		}
-+			// 	}
-+			// }()
-+
-+			response, err := al.processMessage(ctx, msg)
-+			if err != nil {
-+				response = fmt.Sprintf("Error processing message: %v", err)
-+			}
- 
--				if response != "" {
--					// Check if the message tool already sent a response during this round.
--					// If so, skip publishing to avoid duplicate messages to the user.
--					// Use default agent's tools to check (message tool is shared).
--					alreadySent := false
--					defaultAgent := al.GetRegistry().GetDefaultAgent()
--					if defaultAgent != nil {
--						if tool, ok := defaultAgent.Tools.Get("message"); ok {
--							if mt, ok := tool.(*tools.MessageTool); ok {
--								alreadySent = mt.HasSentInRound()
--							}
-+			if response != "" {
-+				// Check if the message tool already sent a response during this round.
-+				// If so, skip publishing to avoid duplicate messages to the user.
-+				// Use default agent's tools to check (message tool is shared).
-+				alreadySent := false
-+				defaultAgent := al.GetRegistry().GetDefaultAgent()
-+				if defaultAgent != nil {
-+					if tool, ok := defaultAgent.Tools.Get("message"); ok {
-+						if mt, ok := tool.(*tools.MessageTool); ok {
-+							alreadySent = mt.HasSentInRound()
- 						}
- 					}
-+				}
- 
--					if !alreadySent {
--						al.bus.PublishOutbound(ctx, bus.OutboundMessage{
--							Channel: msg.Channel,
--							ChatID:  msg.ChatID,
--							Content: response,
-+				if !alreadySent {
-+					al.bus.PublishOutbound(ctx, bus.OutboundMessage{
-+						Channel: msg.Channel,
-+						ChatID:  msg.ChatID,
-+						Content: response,
-+					})
-+					logger.InfoCF("agent", "Published outbound response",
-+						map[string]any{
-+							"channel":     msg.Channel,
-+							"chat_id":     msg.ChatID,
-+							"content_len": len(response),
- 						})
--						logger.InfoCF("agent", "Published outbound response",
--							map[string]any{
--								"channel":     msg.Channel,
--								"chat_id":     msg.ChatID,
--								"content_len": len(response),
--							})
--					} else {
--						logger.DebugCF(
--							"agent",
--							"Skipped outbound (message tool already sent)",
--							map[string]any{"channel": msg.Channel},
--						)
--					}
-+				} else {
-+					logger.DebugCF(
-+						"agent",
-+						"Skipped outbound (message tool already sent)",
-+						map[string]any{"channel": msg.Channel},
-+					)
- 				}
--			}()
-+			}
-+		default:
-+			time.Sleep(time.Microsecond * 200)
- 		}
- 	}
- 
-@@ -741,14 +751,16 @@ func (al *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage)
- 		})
- 
- 	opts := processOptions{
--		SessionKey:      sessionKey,
--		Channel:         msg.Channel,
--		ChatID:          msg.ChatID,
--		UserMessage:     msg.Content,
--		Media:           msg.Media,
--		DefaultResponse: defaultResponse,
--		EnableSummary:   true,
--		SendResponse:    false,
-+		SessionKey:        sessionKey,
-+		Channel:           msg.Channel,
-+		ChatID:            msg.ChatID,
-+		SenderID:          msg.SenderID,
-+		SenderDisplayName: msg.Sender.DisplayName,
-+		UserMessage:       msg.Content,
-+		Media:             msg.Media,
-+		DefaultResponse:   defaultResponse,
-+		EnableSummary:     true,
-+		SendResponse:      false,
- 	}
- 
- 	// context-dependent commands check their own Runtime fields and report
-@@ -888,6 +900,8 @@ func (al *AgentLoop) runAgentLoop(
- 		opts.Media,
- 		opts.Channel,
- 		opts.ChatID,
-+		opts.SenderID,
-+		opts.SenderDisplayName,
- 	)
- 
- 	// Resolve media:// refs: images→base64 data URLs, non-images→local paths in content
-@@ -1159,7 +1173,7 @@ func (al *AgentLoop) runLLMIteration(
- 				newSummary := agent.Sessions.GetSummary(opts.SessionKey)
- 				messages = agent.ContextBuilder.BuildMessages(
- 					newHistory, newSummary, "",
--					nil, opts.Channel, opts.ChatID,
-+					nil, opts.Channel, opts.ChatID, opts.SenderID, opts.SenderDisplayName,
- 				)
- 				continue
- 			}
-diff --git a/pkg/tools/cron_test.go b/pkg/tools/cron_test.go
-index 09d29b6..b09e332 100644
---- a/pkg/tools/cron_test.go
-+++ b/pkg/tools/cron_test.go
-@@ -226,11 +226,12 @@ func TestCronTool_ExecuteJobPublishesErrorWhenExecDisabled(t *testing.T) {
- 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
- 	defer cancel()
- 
--	msg, ok := tool.msgBus.SubscribeOutbound(ctx)
--	if !ok {
--		t.Fatal("expected outbound message")
--	}
--	if !strings.Contains(msg.Content, "command execution is disabled") {
--		t.Fatalf("expected exec disabled message, got: %s", msg.Content)
-+	select {
-+	case msg := <-tool.msgBus.OutboundChan():
-+		if !strings.Contains(msg.Content, "command execution is disabled") {
-+			t.Fatalf("expected exec disabled message, got: %s", msg.Content)
-+		}
-+	case <-ctx.Done():
-+		t.Fatal("timeout waiting for outbound message")
- 	}
- }
 diff --git a/pkg/tools/registry.go b/pkg/tools/registry.go
 index 0635f47..064f77e 100644
 --- a/pkg/tools/registry.go
@@ -302,50 +73,41 @@ index 0635f47..064f77e 100644
  func (r *ToolRegistry) Count() int {
  	r.mu.RLock()
 diff --git a/pkg/tools/registry_test.go b/pkg/tools/registry_test.go
-index 92d7d5a..9f9890d 100644
+index 92d7d5a..e5b3881 100644
 --- a/pkg/tools/registry_test.go
 +++ b/pkg/tools/registry_test.go
-@@ -335,6 +335,96 @@ func TestToolToSchema(t *testing.T) {
+@@ -335,6 +335,95 @@ func TestToolToSchema(t *testing.T) {
  	}
  }
  
 +func TestToolRegistry_Clone(t *testing.T) {
 +	r := NewToolRegistry()
-+	r.Register(newMockTool("read_file", "reads files"))
-+	r.Register(newMockTool("exec", "runs commands"))
-+	r.Register(newMockTool("web_search", "searches the web"))
++	r.Register(newMockTool("tool_a", "first tool"))
++	r.Register(newMockTool("tool_b", "second tool"))
 +
 +	clone := r.Clone()
 +
 +	// Clone should have the same tools
-+	if clone.Count() != 3 {
-+		t.Errorf("expected clone to have 3 tools, got %d", clone.Count())
++	if clone.Count() != 2 {
++		t.Fatalf("expected clone count 2, got %d", clone.Count())
 +	}
-+	for _, name := range []string{"read_file", "exec", "web_search"} {
-+		if _, ok := clone.Get(name); !ok {
-+			t.Errorf("expected clone to have tool %q", name)
-+		}
++	if _, ok := clone.Get("tool_a"); !ok {
++		t.Error("expected tool_a in clone")
 +	}
-+
-+	// Registering on parent should NOT affect clone
-+	r.Register(newMockTool("spawn", "spawns subagent"))
-+	if r.Count() != 4 {
-+		t.Errorf("expected parent to have 4 tools, got %d", r.Count())
-+	}
-+	if clone.Count() != 3 {
-+		t.Errorf("expected clone to still have 3 tools after parent mutation, got %d", clone.Count())
-+	}
-+	if _, ok := clone.Get("spawn"); ok {
-+		t.Error("expected clone NOT to have 'spawn' tool registered on parent after cloning")
++	if _, ok := clone.Get("tool_b"); !ok {
++		t.Error("expected tool_b in clone")
 +	}
 +
-+	// Registering on clone should NOT affect parent
-+	clone.Register(newMockTool("custom", "custom tool"))
-+	if clone.Count() != 4 {
-+		t.Errorf("expected clone to have 4 tools, got %d", clone.Count())
++	// Adding to clone should NOT affect parent
++	clone.Register(newMockTool("tool_c", "clone-only tool"))
++	if _, ok := r.Get("tool_c"); ok {
++		t.Error("tool_c should NOT leak from clone to parent")
 +	}
-+	if _, ok := r.Get("custom"); ok {
-+		t.Error("expected parent NOT to have 'custom' tool registered on clone")
++
++	// Adding to parent should NOT affect clone
++	r.Register(newMockTool("tool_d", "parent-only tool"))
++	if _, ok := clone.Get("tool_d"); ok {
++		t.Error("tool_d should NOT leak from parent to clone")
 +	}
 +}
 +
@@ -354,6 +116,14 @@ index 92d7d5a..9f9890d 100644
 +	clone := r.Clone()
 +	if clone.Count() != 0 {
 +		t.Errorf("expected empty clone, got count %d", clone.Count())
++	}
++	// Adding to empty clone should work
++	clone.Register(newMockTool("new_tool", "fresh"))
++	if clone.Count() != 1 {
++		t.Errorf("expected clone count 1, got %d", clone.Count())
++	}
++	if r.Count() != 0 {
++		t.Error("parent should remain empty after adding to clone")
 +	}
 +}
 +

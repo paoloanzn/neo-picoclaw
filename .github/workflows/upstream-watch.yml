@@ -19,8 +19,9 @@ jobs:
 
       - name: Fetch latest upstream tag
         run: |
+          # Filter out ^{} (dereferenced annotated tag) entries
           LATEST=$(git ls-remote --tags --sort=-v:refname \
-            $UPSTREAM_REPO 'refs/tags/v*' | head -1 | sed 's|.*refs/tags/||')
+            $UPSTREAM_REPO 'refs/tags/v*' | grep -v '\^{}' | head -1 | sed 's|.*refs/tags/||')
           echo "LATEST=$LATEST" >> $GITHUB_ENV
           echo "Current pinned: $CURRENT"
           echo "Latest upstream: $LATEST"
@@ -47,6 +48,7 @@ jobs:
 
       - name: Create tracking issue for new release
         if: steps.compare.outputs.new_release == 'true'
+        continue-on-error: true
         run: |
           # Check if an issue already exists for this version
           EXISTING=$(gh issue list --label "upstream-upgrade" --search "$LATEST" --json number --jq 'length')
