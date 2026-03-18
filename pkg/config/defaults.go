@@ -15,7 +15,7 @@ func DefaultConfig() *Config {
 	// Determine the base path for the workspace.
 	// Priority: $PICOCLAW_HOME > ~/.picoclaw
 	var homePath string
-	if picoclawHome := os.Getenv("PICOCLAW_HOME"); picoclawHome != "" {
+	if picoclawHome := os.Getenv(EnvHome); picoclawHome != "" {
 		homePath = picoclawHome
 	} else {
 		userHome, _ := os.UserHomeDir()
@@ -58,6 +58,7 @@ func DefaultConfig() *Config {
 					Enabled: true,
 					Text:    "Thinking... 💭",
 				},
+				UseMarkdownV2: false,
 			},
 			Feishu: FeishuConfig{
 				Enabled:           false,
@@ -411,8 +412,10 @@ func DefaultConfig() *Config {
 				ToolConfig: ToolConfig{
 					Enabled: true,
 				},
+				PreferNative:    true,
 				Proxy:           "",
 				FetchLimitBytes: 10 * 1024 * 1024, // 10MB by default
+				Format:          "plaintext",
 				Brave: BraveConfig{
 					Enabled:    false,
 					APIKey:     "",

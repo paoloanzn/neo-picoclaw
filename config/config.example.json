@@ -78,9 +78,8 @@
       "token": "YOUR_TELEGRAM_BOT_TOKEN",
       "base_url": "",
       "proxy": "",
-      "allow_from": [
-        "YOUR_USER_ID"
-      ],
+      "allow_from": ["YOUR_USER_ID"],
+      "use_markdown_v2": false,
       "reasoning_channel_id": ""
     },
     "discord": {
@@ -313,6 +312,9 @@
     "allow_write_paths": null,
     "web": {
       "enabled": true,
+      "prefer_native": true,
+      "fetch_limit_bytes": 10485760,
+      "format": "plaintext",
       "brave": {
         "enabled": false,
         "api_key": "YOUR_BRAVE_API_KEY",

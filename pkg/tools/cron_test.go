@@ -226,12 +226,14 @@ func TestCronTool_ExecuteJobPublishesErrorWhenExecDisabled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
+	var msg bus.OutboundMessage
 	select {
-	case msg := <-tool.msgBus.OutboundChan():
-		if !strings.Contains(msg.Content, "command execution is disabled") {
-			t.Fatalf("expected exec disabled message, got: %s", msg.Content)
-		}
+	case msg = <-tool.msgBus.OutboundChan():
+		// got message
 	case <-ctx.Done():
 		t.Fatal("timeout waiting for outbound message")
+	}
+	if !strings.Contains(msg.Content, "command execution is disabled") {
+		t.Fatalf("expected exec disabled message, got: %s", msg.Content)
 	}
 }
