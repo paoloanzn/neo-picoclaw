@@ -136,6 +136,11 @@ TASK:
 5. Validate by running: cd vendor/picoclaw && git reset --hard ${newTag} && git am --3way "${patchPath}.new"
 6. If validation passes, the task is complete. If it fails, iterate and fix the patch.
 
+IMPORTANT: If you determine that the patch is no longer needed because upstream
+already includes the fix or the affected code no longer exists, write the word
+"OBSOLETE" (nothing else) to ${patchPath}.new instead of a patch. This tells the
+CI system to drop the patch.
+
 Output ONLY the final status message. The regenerated patch file is the deliverable.`;
 
   console.log("Invoking Claude Agent SDK for patch regeneration...");
@@ -170,7 +175,7 @@ Output ONLY the final status message. The regenerated patch file is the delivera
     process.exit(1);
   }
 
-  // Check if the .new patch file was written and validates
+  // Check if the .new patch file was written
   const newPatchPath = patchPath + ".new";
   if (!existsSync(newPatchPath)) {
     console.error("ERROR: Agent did not produce a patch file.");
@@ -178,7 +183,18 @@ Output ONLY the final status message. The regenerated patch file is the delivera
     process.exit(1);
   }
 
-  const patchOutput = readFileSync(newPatchPath, "utf-8");
+  const patchOutput = readFileSync(newPatchPath, "utf-8").trim();
+
+  // Check if the agent marked this patch as obsolete (no longer needed)
+  if (patchOutput === "OBSOLETE") {
+    console.log();
+    console.log("Patch is OBSOLETE — upstream already includes this change.");
+    console.log(`Removing: ${failedPatch}`);
+    execSync(`rm "${patchPath}" "${newPatchPath}"`, { encoding: "utf-8" });
+    // Exit with code 0 but signal obsolete via a marker file
+    writeFileSync(patchPath + ".obsolete", "obsolete\n");
+    process.exit(0);
+  }
 
   // Validate the regenerated patch
   console.log("Validating regenerated patch...");
