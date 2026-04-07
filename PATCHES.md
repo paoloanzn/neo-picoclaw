@@ -36,13 +36,6 @@
 - **Risk:** MEDIUM — modifies security-adjacent code. Reduces deny list from ~30 to ~24 patterns and widens path allowlist. Destructive/escalation patterns remain blocked. Tests updated and passing.
 - **Added:** 2026-03-17
 
-## 003-fix-subagent-tools
-- **Purpose:** Fix critical bug where subagents cannot use any tools. `SubagentManager` was initialized with an empty `ToolRegistry` and `SetTools()` was never called after the multi-agent refactor, so all subagent tool invocations returned `"tool not found"`. Fix adds `ToolRegistry.Clone()` method and wires it into `registerSharedTools()` to propagate file, exec, web, and other tools to subagents while excluding spawn/spawn_status (preventing recursive spawning).
-- **Files:** `pkg/tools/registry.go`, `pkg/tools/registry_test.go`, `pkg/agent/loop.go`
-- **Upstream PR:** https://github.com/sipeed/picoclaw/pull/1711
-- **Risk:** LOW — single-line wiring fix plus defensive Clone helper. No behavioral change for existing tools. 3 new tests added.
-- **Added:** 2026-03-17
-
 ## 004-readme-install-line
 - **Purpose:** Add a prominent quick-install one-liner block at the top of the upstream README for the custom fork. Gives users a single copy-paste command to clone, apply patches, and build. Links to PATCHES.md for patch details.
 - **Files:** `README.md`
