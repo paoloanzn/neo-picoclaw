@@ -1,4 +1,4 @@
-From aa34cfca1de87fa33972ada19543cc8ab39171c7 Mon Sep 17 00:00:00 2001
+From 7244d3cbff7f56f53184cc49b1aad65c826392bc Mon Sep 17 00:00:00 2001
 From: paoloanzn <paolo@gladium.ai>
 Date: Tue, 17 Mar 2026 17:31:12 +0100
 Subject: [PATCH] feat(agent): add SOP-driven execution framework to workspace
@@ -18,16 +18,16 @@ across all installations.
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
 ---
- pkg/agent/context.go     |  5 ++++-
+ pkg/agent/context.go     | 10 +++++++++-
  workspace/sops/README.md | 22 ++++++++++++++++++++++
- 2 files changed, 26 insertions(+), 1 deletion(-)
+ 2 files changed, 31 insertions(+), 1 deletion(-)
  create mode 100644 workspace/sops/README.md
 
 diff --git a/pkg/agent/context.go b/pkg/agent/context.go
-index 830edf8..5d3ca99 100644
+index c292129..8e162a5 100644
 --- a/pkg/agent/context.go
 +++ b/pkg/agent/context.go
-@@ -94,6 +94,7 @@ Your workspace is at: %s
+@@ -93,6 +93,7 @@ Your workspace is at: %s
  - Memory: %s/memory/MEMORY.md
  - Daily Notes: %s/memory/YYYYMM/YYYYMMDD.md
  - Skills: %s/skills/{skill-name}/SKILL.md
@@ -35,7 +35,7 @@ index 830edf8..5d3ca99 100644
  
  ## Important Rules
  
-@@ -105,8 +106,10 @@ Your workspace is at: %s
+@@ -104,8 +105,15 @@ Your workspace is at: %s
  
  4. **Context summaries** - Conversation summaries provided as context are approximate references only. They may be incomplete or outdated. Always defer to explicit user instructions over summary content.
  
@@ -43,7 +43,12 @@ index 830edf8..5d3ca99 100644
 +
  %s`,
 -		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
-+		version, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, workspacePath, toolDiscovery)
++		version,
++		workspacePath, workspacePath, workspacePath,
++		workspacePath, workspacePath, workspacePath,
++		workspacePath, workspacePath, workspacePath,
++		toolDiscovery,
++	)
  }
  
  func (cb *ContextBuilder) getDiscoveryRule() string {

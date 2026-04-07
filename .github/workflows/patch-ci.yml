@@ -73,19 +73,23 @@ jobs:
 
       - name: Build upstream with patches (Go)
         if: steps.check.outputs.patch_count != '0'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: vendor/picoclaw/go.mod
 
       - name: Verify build
         if: steps.check.outputs.patch_count != '0'
+        env:
+          CGO_ENABLED: "0"
         run: |
           cd vendor/picoclaw
           go generate ./...
-          go build ./...
+          go build -tags goolm,stdjson ./cmd/picoclaw
 
       - name: Run tests
         if: steps.check.outputs.patch_count != '0'
+        env:
+          CGO_ENABLED: "0"
         run: |
           cd vendor/picoclaw
-          go test ./... -short -count=1
+          go test -tags goolm,stdjson ./... -short -count=1

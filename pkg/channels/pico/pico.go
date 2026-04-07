@@ -2,6 +2,7 @@ package pico
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,6 +28,15 @@ type picoConn struct {
 	sessionID string
 	writeMu   sync.Mutex
 	closed    atomic.Bool
+	cancel    context.CancelFunc // cancels per-connection goroutines (e.g. pingLoop)
+}
+
+var allowedInlineImageMIMETypes = map[string]struct{}{
+	"image/jpeg": {},
+	"image/png":  {},
+	"image/gif":  {},
+	"image/webp": {},
+	"image/bmp":  {},
 }
 
 // writeJSON sends a JSON message to the connection with write locking.
@@ -42,6 +52,9 @@ func (pc *picoConn) writeJSON(v any) error {
 // close closes the connection.
 func (pc *picoConn) close() {
 	if pc.closed.CompareAndSwap(false, true) {
+		if pc.cancel != nil {
+			pc.cancel()
+		}
 		pc.conn.Close()
 	}
 }
@@ -50,17 +63,18 @@ func (pc *picoConn) close() {
 // It serves as the reference implementation for all optional capability interfaces.
 type PicoChannel struct {
 	*channels.BaseChannel
-	config      config.PicoConfig
-	upgrader    websocket.Upgrader
-	connections sync.Map // connID → *picoConn
-	connCount   atomic.Int32
-	ctx         context.Context
-	cancel      context.CancelFunc
+	config             config.PicoConfig
+	upgrader           websocket.Upgrader
+	connections        map[string]*picoConn            // connID -> *picoConn
+	sessionConnections map[string]map[string]*picoConn // sessionID -> connID -> *picoConn
+	connsMu            sync.RWMutex
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 // NewPicoChannel creates a new Pico Protocol channel.
 func NewPicoChannel(cfg config.PicoConfig, messageBus *bus.MessageBus) (*PicoChannel, error) {
-	if cfg.Token == "" {
+	if cfg.Token.String() == "" {
 		return nil, fmt.Errorf("pico token is required")
 	}
 
@@ -88,7 +102,102 @@ func NewPicoChannel(cfg config.PicoConfig, messageBus *bus.MessageBus) (*PicoCha
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
+		connections:        make(map[string]*picoConn),
+		sessionConnections: make(map[string]map[string]*picoConn),
 	}, nil
+}
+
+// createAndAddConnection checks MaxConnections and registers a connection atomically.
+func (c *PicoChannel) createAndAddConnection(conn *websocket.Conn, sessionID string, maxConns int) (*picoConn, error) {
+	c.connsMu.Lock()
+	defer c.connsMu.Unlock()
+	if len(c.connections) >= maxConns {
+		return nil, channels.ErrTemporary
+	}
+
+	var connID string
+	for {
+		connID = uuid.New().String()
+		if _, exists := c.connections[connID]; !exists {
+			break
+		}
+	}
+
+	pc := &picoConn{
+		id:        connID,
+		conn:      conn,
+		sessionID: sessionID,
+	}
+
+	c.connections[pc.id] = pc
+	bySession, ok := c.sessionConnections[pc.sessionID]
+	if !ok {
+		bySession = make(map[string]*picoConn)
+		c.sessionConnections[pc.sessionID] = bySession
+	}
+	bySession[pc.id] = pc
+
+	return pc, nil
+}
+
+// removeConnection deletes a connection from indexes and returns it when found.
+func (c *PicoChannel) removeConnection(connID string) *picoConn {
+	c.connsMu.Lock()
+	defer c.connsMu.Unlock()
+
+	pc, ok := c.connections[connID]
+	if !ok {
+		return nil
+	}
+
+	delete(c.connections, connID)
+	if bySession, ok := c.sessionConnections[pc.sessionID]; ok {
+		delete(bySession, connID)
+		if len(bySession) == 0 {
+			delete(c.sessionConnections, pc.sessionID)
+		}
+	}
+
+	return pc
+}
+
+// takeAllConnections snapshots and clears all connection indexes.
+func (c *PicoChannel) takeAllConnections() []*picoConn {
+	c.connsMu.Lock()
+	defer c.connsMu.Unlock()
+
+	all := make([]*picoConn, 0, len(c.connections))
+	for _, pc := range c.connections {
+		all = append(all, pc)
+	}
+	clear(c.connections)
+	clear(c.sessionConnections)
+
+	return all
+}
+
+// sessionConnectionsSnapshot returns all active connections for a session.
+func (c *PicoChannel) sessionConnectionsSnapshot(sessionID string) []*picoConn {
+	c.connsMu.RLock()
+	defer c.connsMu.RUnlock()
+
+	bySession, ok := c.sessionConnections[sessionID]
+	if !ok || len(bySession) == 0 {
+		return nil
+	}
+
+	conns := make([]*picoConn, 0, len(bySession))
+	for _, pc := range bySession {
+		conns = append(conns, pc)
+	}
+	return conns
+}
+
+// currentConnCount returns a lock-protected snapshot of active connection count.
+func (c *PicoChannel) currentConnCount() int {
+	c.connsMu.RLock()
+	defer c.connsMu.RUnlock()
+	return len(c.connections)
 }
 
 // Start implements Channel.
@@ -106,13 +215,9 @@ func (c *PicoChannel) Stop(ctx context.Context) error {
 	c.SetRunning(false)
 
 	// Close all connections
-	c.connections.Range(func(key, value any) bool {
-		if pc, ok := value.(*picoConn); ok {
-			pc.close()
-		}
-		c.connections.Delete(key)
-		return true
-	})
+	for _, pc := range c.takeAllConnections() {
+		pc.close()
+	}
 
 	if c.cancel != nil {
 		c.cancel()
@@ -129,8 +234,8 @@ func (c *PicoChannel) WebhookPath() string { return "/pico/" }
 func (c *PicoChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/pico")
 
-	switch {
-	case path == "/ws" || path == "/ws/":
+	switch path {
+	case "/ws", "/ws/":
 		c.handleWebSocket(w, r)
 	default:
 		http.NotFound(w, r)
@@ -138,16 +243,16 @@ func (c *PicoChannel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Send implements Channel — sends a message to the appropriate WebSocket connection.
-func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) error {
+func (c *PicoChannel) Send(ctx context.Context, msg bus.OutboundMessage) ([]string, error) {
 	if !c.IsRunning() {
-		return channels.ErrNotRunning
+		return nil, channels.ErrNotRunning
 	}
 
 	outMsg := newMessage(TypeMessageCreate, map[string]any{
 		"content": msg.Content,
 	})
 
-	return c.broadcastToSession(msg.ChatID, outMsg)
+	return nil, c.broadcastToSession(msg.ChatID, outMsg)
 }
 
 // EditMessage implements channels.MessageEditor.
@@ -179,10 +284,7 @@ func (c *PicoChannel) SendPlaceholder(ctx context.Context, chatID string) (strin
 		return "", nil
 	}
 
-	text := c.config.Placeholder.Text
-	if text == "" {
-		text = "Thinking... 💭"
-	}
+	text := c.config.Placeholder.GetRandomText()
 
 	msgID := uuid.New().String()
 	outMsg := newMessage(TypeMessageCreate, map[string]any{
@@ -204,23 +306,16 @@ func (c *PicoChannel) broadcastToSession(chatID string, msg PicoMessage) error {
 	msg.SessionID = sessionID
 
 	var sent bool
-	c.connections.Range(func(key, value any) bool {
-		pc, ok := value.(*picoConn)
-		if !ok {
-			return true
+	for _, pc := range c.sessionConnectionsSnapshot(sessionID) {
+		if err := pc.writeJSON(msg); err != nil {
+			logger.DebugCF("pico", "Write to connection failed", map[string]any{
+				"conn_id": pc.id,
+				"error":   err.Error(),
+			})
+		} else {
+			sent = true
 		}
-		if pc.sessionID == sessionID {
-			if err := pc.writeJSON(msg); err != nil {
-				logger.DebugCF("pico", "Write to connection failed", map[string]any{
-					"conn_id": pc.id,
-					"error":   err.Error(),
-				})
-			} else {
-				sent = true
-			}
-		}
-		return true
-	})
+	}
 
 	if !sent {
 		return fmt.Errorf("no active connections for session %s: %w", sessionID, channels.ErrSendFailed)
@@ -246,7 +341,7 @@ func (c *PicoChannel) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	if maxConns <= 0 {
 		maxConns = 100
 	}
-	if int(c.connCount.Load()) >= maxConns {
+	if c.currentConnCount() >= maxConns {
 		http.Error(w, "too many connections", http.StatusServiceUnavailable)
 		return
 	}
@@ -271,14 +366,16 @@ func (c *PicoChannel) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		sessionID = uuid.New().String()
 	}
 
-	pc := &picoConn{
-		id:        uuid.New().String(),
-		conn:      conn,
-		sessionID: sessionID,
+	pc, err := c.createAndAddConnection(conn, sessionID, maxConns)
+	if err != nil {
+		_ = conn.WriteControl(
+			websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "too many connections"),
+			time.Now().Add(2*time.Second),
+		)
+		_ = conn.Close()
+		return
 	}
-
-	c.connections.Store(pc.id, pc)
-	c.connCount.Add(1)
 
 	logger.InfoCF("pico", "WebSocket client connected", map[string]any{
 		"conn_id":    pc.id,
@@ -293,7 +390,7 @@ func (c *PicoChannel) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 //  2. Sec-WebSocket-Protocol "token.<value>" (for browsers that can't set headers)
 //  3. Query parameter "token" (only when AllowTokenQuery is on)
 func (c *PicoChannel) authenticate(r *http.Request) bool {
-	token := c.config.Token
+	token := c.config.Token.String()
 	if token == "" {
 		return false
 	}
@@ -324,7 +421,7 @@ func (c *PicoChannel) authenticate(r *http.Request) bool {
 // matchedSubprotocol returns the "token.<value>" subprotocol that matches
 // the configured token, or "" if none do.
 func (c *PicoChannel) matchedSubprotocol(r *http.Request) string {
-	token := c.config.Token
+	token := c.config.Token.String()
 	for _, proto := range websocket.Subprotocols(r) {
 		if after, ok := strings.CutPrefix(proto, "token."); ok && after == token {
 			return proto
@@ -337,12 +434,12 @@ func (c *PicoChannel) matchedSubprotocol(r *http.Request) string {
 func (c *PicoChannel) readLoop(pc *picoConn) {
 	defer func() {
 		pc.close()
-		c.connections.Delete(pc.id)
-		c.connCount.Add(-1)
-		logger.InfoCF("pico", "WebSocket client disconnected", map[string]any{
-			"conn_id":    pc.id,
-			"session_id": pc.sessionID,
-		})
+		if removed := c.removeConnection(pc.id); removed != nil {
+			logger.InfoCF("pico", "WebSocket client disconnected", map[string]any{
+				"conn_id":    removed.id,
+				"session_id": removed.sessionID,
+			})
+		}
 	}()
 
 	readTimeout := time.Duration(c.config.ReadTimeout) * time.Second
@@ -428,6 +525,9 @@ func (c *PicoChannel) handleMessage(pc *picoConn, msg PicoMessage) {
 	case TypeMessageSend:
 		c.handleMessageSend(pc, msg)
 
+	case TypeMediaSend:
+		c.handleMessageSend(pc, msg)
+
 	default:
 		errMsg := newError("unknown_type", fmt.Sprintf("unknown message type: %s", msg.Type))
 		pc.writeJSON(errMsg)
@@ -437,8 +537,19 @@ func (c *PicoChannel) handleMessage(pc *picoConn, msg PicoMessage) {
 // handleMessageSend processes an inbound message.send from a client.
 func (c *PicoChannel) handleMessageSend(pc *picoConn, msg PicoMessage) {
 	content, _ := msg.Payload["content"].(string)
-	if strings.TrimSpace(content) == "" {
-		errMsg := newError("empty_content", "message content is empty")
+	media, err := parseInlineImageMedia(msg.Payload)
+	if err != nil {
+		errMsg := newErrorWithPayload("invalid_media", err.Error(), map[string]any{
+			"request_id": msg.ID,
+		})
+		pc.writeJSON(errMsg)
+		return
+	}
+
+	if strings.TrimSpace(content) == "" && len(media) == 0 {
+		errMsg := newErrorWithPayload("empty_content", "message content is empty", map[string]any{
+			"request_id": msg.ID,
+		})
 		pc.writeJSON(errMsg)
 		return
 	}
@@ -462,6 +573,7 @@ func (c *PicoChannel) handleMessageSend(pc *picoConn, msg PicoMessage) {
 	logger.DebugCF("pico", "Received message", map[string]any{
 		"session_id": sessionID,
 		"preview":    truncate(content, 50),
+		"media":      len(media),
 	})
 
 	sender := bus.SenderInfo{
@@ -474,7 +586,7 @@ func (c *PicoChannel) handleMessageSend(pc *picoConn, msg PicoMessage) {
 		return
 	}
 
-	c.HandleMessage(c.ctx, peer, msg.ID, senderID, chatID, content, nil, metadata, sender)
+	c.HandleMessage(c.ctx, peer, msg.ID, senderID, chatID, content, media, metadata, sender)
 }
 
 // truncate truncates a string to maxLen runes.
@@ -484,4 +596,100 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+func parseInlineImageMedia(payload map[string]any) ([]string, error) {
+	if len(payload) == 0 {
+		return nil, nil
+	}
+
+	raw, ok := payload["media"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+
+	switch values := raw.(type) {
+	case []any:
+		media := make([]string, 0, len(values))
+		for i, item := range values {
+			value, err := inlineImageValue(item)
+			if err != nil {
+				return nil, fmt.Errorf("media[%d]: %w", i, err)
+			}
+			if err := validateInlineImageDataURL(value); err != nil {
+				return nil, fmt.Errorf("media[%d]: %w", i, err)
+			}
+			media = append(media, value)
+		}
+		return media, nil
+	case []string:
+		media := make([]string, 0, len(values))
+		for i, value := range values {
+			value = strings.TrimSpace(value)
+			if err := validateInlineImageDataURL(value); err != nil {
+				return nil, fmt.Errorf("media[%d]: %w", i, err)
+			}
+			media = append(media, value)
+		}
+		return media, nil
+	case string:
+		value := strings.TrimSpace(values)
+		if err := validateInlineImageDataURL(value); err != nil {
+			return nil, err
+		}
+		return []string{value}, nil
+	default:
+		return nil, fmt.Errorf("media must be a string or array of strings")
+	}
+}
+
+func inlineImageValue(item any) (string, error) {
+	switch value := item.(type) {
+	case string:
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return "", fmt.Errorf("image payload is empty")
+		}
+		return value, nil
+	case map[string]any:
+		for _, key := range []string{"url", "data_url"} {
+			if raw, ok := value[key].(string); ok && strings.TrimSpace(raw) != "" {
+				return strings.TrimSpace(raw), nil
+			}
+		}
+		return "", fmt.Errorf("image payload must include url or data_url")
+	default:
+		return "", fmt.Errorf("image payload must be a string or object")
+	}
+}
+
+func validateInlineImageDataURL(mediaURL string) error {
+	if mediaURL == "" {
+		return fmt.Errorf("image payload is empty")
+	}
+	if !strings.HasPrefix(mediaURL, "data:image/") {
+		return fmt.Errorf("only inline image data URLs are supported")
+	}
+
+	header, data, found := strings.Cut(mediaURL, ",")
+	if !found || strings.TrimSpace(data) == "" {
+		return fmt.Errorf("image data URL is malformed")
+	}
+	if !strings.Contains(header, ";base64") {
+		return fmt.Errorf("image data URL must be base64 encoded")
+	}
+	mimeType, _, _ := strings.Cut(strings.TrimPrefix(header, "data:"), ";")
+	if _, ok := allowedInlineImageMIMETypes[mimeType]; !ok {
+		return fmt.Errorf("unsupported image format: %s", mimeType)
+	}
+
+	data = strings.TrimSpace(data)
+	if base64.StdEncoding.DecodedLen(len(data)) > config.DefaultMaxMediaSize {
+		return fmt.Errorf("image exceeds %d byte limit", config.DefaultMaxMediaSize)
+	}
+	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
+		return fmt.Errorf("invalid base64 image data")
+	}
+
+	return nil
 }

@@ -41,15 +41,16 @@ type Provider struct {
 	apiKey     string
 	apiBase    string
 	httpClient *http.Client
+	userAgent  string
 }
 
 // NewProvider creates a new Anthropic Messages API provider.
-func NewProvider(apiKey, apiBase string) *Provider {
-	return NewProviderWithTimeout(apiKey, apiBase, 0)
+func NewProvider(apiKey, apiBase, userAgent string) *Provider {
+	return NewProviderWithTimeout(apiKey, apiBase, userAgent, 0)
 }
 
 // NewProviderWithTimeout creates a provider with custom request timeout.
-func NewProviderWithTimeout(apiKey, apiBase string, timeoutSeconds int) *Provider {
+func NewProviderWithTimeout(apiKey, apiBase, userAgent string, timeoutSeconds int) *Provider {
 	baseURL := normalizeBaseURL(apiBase)
 	timeout := defaultRequestTimeout
 	if timeoutSeconds > 0 {
@@ -57,8 +58,9 @@ func NewProviderWithTimeout(apiKey, apiBase string, timeoutSeconds int) *Provide
 	}
 
 	return &Provider{
-		apiKey:  apiKey,
-		apiBase: baseURL,
+		apiKey:    apiKey,
+		apiBase:   baseURL,
+		userAgent: userAgent,
 		httpClient: &http.Client{
 			Timeout: timeout,
 		},
@@ -105,6 +107,9 @@ func (p *Provider) Chat(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-API-Key", p.apiKey) //nolint:canonicalheader // Anthropic API requires exact header name
 	req.Header.Set("Anthropic-Version", defaultAPIVersion)
+	if p.userAgent != "" {
+		req.Header.Set("User-Agent", p.userAgent)
+	}
 
 	// Execute request
 	resp, err := p.httpClient.Do(req)
@@ -188,17 +193,23 @@ func buildRequestBody(
 
 		case "user":
 			if msg.ToolCallID != "" {
-				// Tool result message
-				content := []map[string]any{
-					{
-						"type":        "tool_result",
-						"tool_use_id": msg.ToolCallID,
-						"content":     msg.Content,
-					},
+				// Tool result message — merge into previous user message if it contains tool_results
+				toolResultBlock := map[string]any{
+					"type":        "tool_result",
+					"tool_use_id": msg.ToolCallID,
+					"content":     msg.Content,
+				}
+				if len(apiMessages) > 0 {
+					if prev, ok := apiMessages[len(apiMessages)-1].(map[string]any); ok && prev["role"] == "user" {
+						if content, ok := prev["content"].([]map[string]any); ok {
+							prev["content"] = append(content, toolResultBlock)
+							continue
+						}
+					}
 				}
 				apiMessages = append(apiMessages, map[string]any{
 					"role":    "user",
-					"content": content,
+					"content": []map[string]any{toolResultBlock},
 				})
 			} else {
 				// Regular user message
@@ -221,6 +232,10 @@ func buildRequestBody(
 
 			// Add tool_use blocks
 			for _, tc := range msg.ToolCalls {
+				if strings.TrimSpace(tc.Name) == "" {
+					continue
+				}
+
 				// Handle nil Arguments (GLM-4 may return null input)
 				input := tc.Arguments
 				if input == nil {
@@ -242,17 +257,23 @@ func buildRequestBody(
 			})
 
 		case "tool":
-			// Tool result (alternative format)
-			content := []map[string]any{
-				{
-					"type":        "tool_result",
-					"tool_use_id": msg.ToolCallID,
-					"content":     msg.Content,
-				},
+			// Tool result (alternative format) — merge into previous user message if it contains tool_results
+			toolResultBlock := map[string]any{
+				"type":        "tool_result",
+				"tool_use_id": msg.ToolCallID,
+				"content":     msg.Content,
+			}
+			if len(apiMessages) > 0 {
+				if prev, ok := apiMessages[len(apiMessages)-1].(map[string]any); ok && prev["role"] == "user" {
+					if content, ok := prev["content"].([]map[string]any); ok {
+						prev["content"] = append(content, toolResultBlock)
+						continue
+					}
+				}
 			}
 			apiMessages = append(apiMessages, map[string]any{
 				"role":    "user",
-				"content": content,
+				"content": []map[string]any{toolResultBlock},
 			})
 		}
 	}
