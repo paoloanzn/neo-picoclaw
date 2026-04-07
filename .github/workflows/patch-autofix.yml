@@ -61,10 +61,10 @@ jobs:
             NAME="$(basename "$p")"
             if git am --3way "$p" 2>/dev/null; then
               echo "OK: $NAME"
-              PASSED="$PASSED $NAME"
+              PASSED="${PASSED:+$PASSED }$NAME"
             else
               echo "FAIL: $NAME"
-              FAILED="$FAILED $NAME"
+              FAILED="${FAILED:+$FAILED }$NAME"
               git am --abort 2>/dev/null || true
             fi
             # Reset for next independent test
