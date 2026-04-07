@@ -128,24 +128,32 @@ ${upstreamDiff || "(Could not compute diff)"}
 NEW source files at ${newTag}:
 ${fileContents || "(Could not read files)"}
 
-TASK: Regenerate the patch so it applies cleanly to ${newTag}
-while preserving the original intent. Output ONLY the new
-.patch file content in git format-patch format.
-Keep the same commit message. Adapt line numbers and context.`;
+TASK:
+1. Use Bash to run \`git diff ${oldTag}..${newTag} -- ${affectedFiles.join(" ")}\` in the vendor/picoclaw directory to see what changed
+2. Use Read to examine the current versions of the affected files in vendor/picoclaw
+3. Regenerate the patch so it applies cleanly to ${newTag} while preserving the original intent
+4. Write the new patch to ${patchPath}.new using the Write tool
+5. Validate by running: cd vendor/picoclaw && git reset --hard ${newTag} && git am --3way "${patchPath}.new"
+6. If validation passes, the task is complete. If it fails, iterate and fix the patch.
+
+Output ONLY the final status message. The regenerated patch file is the deliverable.`;
 
   console.log("Invoking Claude Agent SDK for patch regeneration...");
   console.log();
 
-  // Call Claude via Agent SDK
+  // Call Claude via Agent SDK with proper tool access for CI
   let result = "";
   for await (const message of query({
     prompt,
     options: {
-      allowedTools: [],
+      allowedTools: ["Read", "Write", "Bash", "Glob", "Grep"],
+      permissionMode: "bypassPermissions",
+      cwd: buildDir,
+      maxTurns: 30,
     },
   })) {
-    if ("result" in message) {
-      result = message.result;
+    if (message.type === "result") {
+      result = message.result ?? "";
     }
   }
 
@@ -162,16 +170,15 @@ Keep the same commit message. Adapt line numbers and context.`;
     process.exit(1);
   }
 
-  // Extract the patch content from the response (it may be wrapped in markdown code fences)
-  let patchOutput = result;
-  const fenceMatch = result.match(/```(?:diff|patch)?\n([\s\S]*?)```/);
-  if (fenceMatch) {
-    patchOutput = fenceMatch[1];
+  // Check if the .new patch file was written and validates
+  const newPatchPath = patchPath + ".new";
+  if (!existsSync(newPatchPath)) {
+    console.error("ERROR: Agent did not produce a patch file.");
+    console.error("Result:", result);
+    process.exit(1);
   }
 
-  // Write the regenerated patch
-  const newPatchPath = patchPath + ".new";
-  writeFileSync(newPatchPath, patchOutput);
+  const patchOutput = readFileSync(newPatchPath, "utf-8");
 
   // Validate the regenerated patch
   console.log("Validating regenerated patch...");
