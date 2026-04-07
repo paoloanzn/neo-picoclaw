@@ -1,19 +1,18 @@
 name: Auto-Fix Patches
 
 on:
-  # Triggered by upstream-watch when a new release is detected
-  workflow_dispatch:
-    inputs:
-      new_tag:
-        description: 'New upstream tag to upgrade to'
-        required: true
-  # Can also be called by other workflows
-  workflow_call:
-    inputs:
-      new_tag:
-        description: 'New upstream tag to upgrade to'
-        required: true
-        type: string
+  # DISABLED — workflow is broken, patches are applied manually for now
+  # workflow_dispatch:
+  #   inputs:
+  #     new_tag:
+  #       description: 'New upstream tag to upgrade to'
+  #       required: true
+  # workflow_call:
+  #   inputs:
+  #     new_tag:
+  #       description: 'New upstream tag to upgrade to'
+  #       required: true
+  #       type: string
 
 jobs:
   autofix:
