@@ -25,13 +25,13 @@ build/
 # Secrets & Config (keep templates, ignore actual secrets)
 .env
 config/config.json
+.security.yml
+onboard
+
 
 # Test
 coverage.txt
 coverage.html
-
-# Node
-node_modules/
 
 # OS
 .DS_Store
@@ -43,13 +43,11 @@ tasks/
 
 # Plans
 docs/plans/
+docs/superpowers/
 
 # Editors
 .vscode/
 .idea/
-
-# Patch system — built at CI/install time
-vendor/picoclaw/
 
 # Added by goreleaser init:
 dist/
@@ -58,7 +56,15 @@ dist/
 # Windows Application Icon/Resource
 *.syso
 
+# Test telegram integration
+cmd/telegram/
+
 # Keep embedded backend dist directory placeholder in VCS
 !web/backend/dist/
 web/backend/dist/*
 !web/backend/dist/.gitkeep
+
+.claude/
+
+docker/data
+vendor/picoclaw

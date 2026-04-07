@@ -37,7 +37,7 @@ func setupWorkspace(t *testing.T, files map[string]string) string {
 // Codex (only reads last system message as instructions).
 func TestSingleSystemMessage(t *testing.T) {
 	tmpDir := setupWorkspace(t, map[string]string{
-		"IDENTITY.md": "# Identity\nTest agent.",
+		"AGENT.md": "# Agent\nTest agent.",
 	})
 	defer os.RemoveAll(tmpDir)
 
@@ -202,10 +202,10 @@ func TestMtimeAutoInvalidation(t *testing.T) {
 	}{
 		{
 			name:       "bootstrap file change",
-			file:       "IDENTITY.md",
-			contentV1:  "# Original Identity",
-			contentV2:  "# Updated Identity",
-			checkField: "Updated Identity",
+			file:       "AGENT.md",
+			contentV1:  "# Original Agent",
+			contentV2:  "# Updated Agent",
+			checkField: "Updated Agent",
 		},
 		{
 			name:       "memory file change",
@@ -280,7 +280,7 @@ func TestMtimeAutoInvalidation(t *testing.T) {
 // even when source files haven't changed (useful for tests and reload commands).
 func TestExplicitInvalidateCache(t *testing.T) {
 	tmpDir := setupWorkspace(t, map[string]string{
-		"IDENTITY.md": "# Test Identity",
+		"AGENT.md": "# Test Agent",
 	})
 	defer os.RemoveAll(tmpDir)
 
@@ -307,8 +307,8 @@ func TestExplicitInvalidateCache(t *testing.T) {
 // when no files change (regression test for issue #607).
 func TestCacheStability(t *testing.T) {
 	tmpDir := setupWorkspace(t, map[string]string{
-		"IDENTITY.md": "# Identity\nContent",
-		"SOUL.md":     "# Soul\nContent",
+		"AGENT.md": "# Agent\nContent",
+		"SOUL.md":  "# Soul\nContent",
 	})
 	defer os.RemoveAll(tmpDir)
 
@@ -607,7 +607,7 @@ description: delete-me-v1
 // Run with: go test -race ./pkg/agent/ -run TestConcurrentBuildSystemPromptWithCache
 func TestConcurrentBuildSystemPromptWithCache(t *testing.T) {
 	tmpDir := setupWorkspace(t, map[string]string{
-		"IDENTITY.md":          "# Identity\nConcurrency test agent.",
+		"AGENT.md":             "# Agent\nConcurrency test agent.",
 		"SOUL.md":              "# Soul\nBe helpful.",
 		"memory/MEMORY.md":     "# Memory\nUser prefers Go.",
 		"skills/demo/SKILL.md": "---\nname: demo\ndescription: \"demo skill\"\n---\n# Demo",
@@ -707,6 +707,38 @@ func TestEmptyWorkspaceBaselineDetectsNewFiles(t *testing.T) {
 	}
 }
 
+func TestBuildMessages_IncludesMediaOnlyCurrentMessage(t *testing.T) {
+	tmpDir := setupWorkspace(t, nil)
+	defer os.RemoveAll(tmpDir)
+
+	cb := NewContextBuilder(tmpDir)
+	msgs := cb.BuildMessages(
+		nil,
+		"",
+		"",
+		[]string{"data:image/png;base64,abc123"},
+		"pico",
+		"chat-1",
+		"",
+		"",
+	)
+
+	if len(msgs) != 2 {
+		t.Fatalf("len(msgs) = %d, want 2", len(msgs))
+	}
+
+	userMsg := msgs[1]
+	if userMsg.Role != "user" {
+		t.Fatalf("userMsg.Role = %q, want %q", userMsg.Role, "user")
+	}
+	if userMsg.Content != "" {
+		t.Fatalf("userMsg.Content = %q, want empty string", userMsg.Content)
+	}
+	if len(userMsg.Media) != 1 || userMsg.Media[0] != "data:image/png;base64,abc123" {
+		t.Fatalf("userMsg.Media = %#v, want image payload", userMsg.Media)
+	}
+}
+
 // BenchmarkBuildMessagesWithCache measures caching performance.
 func BenchmarkBuildMessagesWithCache(b *testing.B) {
 	tmpDir, _ := os.MkdirTemp("", "picoclaw-bench-*")
@@ -714,7 +746,7 @@ func BenchmarkBuildMessagesWithCache(b *testing.B) {
 
 	os.MkdirAll(filepath.Join(tmpDir, "memory"), 0o755)
 	os.MkdirAll(filepath.Join(tmpDir, "skills"), 0o755)
-	for _, name := range []string{"IDENTITY.md", "SOUL.md", "USER.md"} {
+	for _, name := range []string{"AGENT.md", "SOUL.md"} {
 		os.WriteFile(filepath.Join(tmpDir, name), []byte(strings.Repeat("Content.\n", 10)), 0o644)
 	}
 

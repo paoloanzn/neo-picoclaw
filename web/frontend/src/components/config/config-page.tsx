@@ -1,4 +1,4 @@
-import { IconCode, IconDeviceFloppy } from "@tabler/icons-react"
+import { IconCode, IconDeviceFloppy, IconTag } from "@tabler/icons-react"
 import { useQuery, useQueryClient } from "@tanstack/react-query"
 import { Link } from "@tanstack/react-router"
 import { useEffect, useState } from "react"
@@ -6,9 +6,11 @@ import { useTranslation } from "react-i18next"
 import { toast } from "sonner"
 
 import { patchAppConfig } from "@/api/channels"
+import { launcherFetch } from "@/api/http"
 import {
   getAutoStartStatus,
   getLauncherConfig,
+  getSystemVersionInfo,
   setAutoStartEnabled as updateAutoStartEnabled,
   setLauncherConfig as updateLauncherConfig,
 } from "@/api/system"
@@ -31,7 +33,9 @@ import {
   parseMultilineList,
 } from "@/components/config/form-model"
 import { PageHeader } from "@/components/page-header"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { refreshGatewayState } from "@/store/gateway"
 
 export function ConfigPage() {
   const { t } = useTranslation()
@@ -49,7 +53,7 @@ export function ConfigPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["config"],
     queryFn: async () => {
-      const res = await fetch("/api/config")
+      const res = await launcherFetch("/api/config")
       if (!res.ok) {
         throw new Error("Failed to load config")
       }
@@ -60,6 +64,12 @@ export function ConfigPage() {
   const { data: launcherConfig, isLoading: isLauncherLoading } = useQuery({
     queryKey: ["system", "launcher-config"],
     queryFn: getLauncherConfig,
+  })
+
+  const { data: versionInfo } = useQuery({
+    queryKey: ["system", "version"],
+    queryFn: getSystemVersionInfo,
+    staleTime: 5 * 60 * 1000,
   })
 
   const {
@@ -84,6 +94,7 @@ export function ConfigPage() {
       port: String(launcherConfig.port),
       publicAccess: launcherConfig.public,
       allowedCIDRsText: (launcherConfig.allowed_cidrs ?? []).join("\n"),
+      launcherToken: launcherConfig.launcher_token ?? "",
     }
     setLauncherForm(parsed)
     setLauncherBaseline(parsed)
@@ -147,10 +158,18 @@ export function ConfigPage() {
         const maxTokens = parseIntField(form.maxTokens, "Max tokens", {
           min: 1,
         })
+        const contextWindow = form.contextWindow.trim()
+          ? parseIntField(form.contextWindow, "Context window", { min: 1 })
+          : undefined
         const maxToolIterations = parseIntField(
           form.maxToolIterations,
           "Max tool iterations",
           { min: 1 },
+        )
+        const toolFeedbackMaxArgsLength = parseIntField(
+          form.toolFeedbackMaxArgsLength,
+          "Tool feedback max args length",
+          { min: 0 },
         )
         const summarizeMessageThreshold = parseIntField(
           form.summarizeMessageThreshold,
@@ -200,7 +219,13 @@ export function ConfigPage() {
             defaults: {
               workspace,
               restrict_to_workspace: form.restrictToWorkspace,
+              split_on_marker: form.splitOnMarker,
+              tool_feedback: {
+                enabled: form.toolFeedbackEnabled,
+                max_args_length: toolFeedbackMaxArgsLength,
+              },
               max_tokens: maxTokens,
+              context_window: contextWindow,
               max_tool_iterations: maxToolIterations,
               summarize_message_threshold: summarizeMessageThreshold,
               summarize_token_percent: summarizeTokenPercent,
@@ -240,6 +265,7 @@ export function ConfigPage() {
           port,
           public: launcherForm.publicAccess,
           allowed_cidrs: allowedCIDRs,
+          launcher_token: launcherForm.launcherToken.trim(),
         })
         const parsedLauncher: LauncherForm = {
           port: String(savedLauncherConfig.port),
@@ -247,6 +273,7 @@ export function ConfigPage() {
           allowedCIDRsText: (savedLauncherConfig.allowed_cidrs ?? []).join(
             "\n",
           ),
+          launcherToken: savedLauncherConfig.launcher_token ?? "",
         }
         setLauncherForm(parsedLauncher)
         setLauncherBaseline(parsedLauncher)
@@ -267,6 +294,7 @@ export function ConfigPage() {
       }
 
       toast.success(t("pages.config.save_success"))
+      void refreshGatewayState({ force: true })
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : t("pages.config.save_error"),
@@ -280,6 +308,17 @@ export function ConfigPage() {
     <div className="flex h-full flex-col">
       <PageHeader
         title={t("navigation.config")}
+        titleExtra={
+          versionInfo && (
+            <Badge
+              variant="secondary"
+              className="gap-1 font-mono text-[11px] font-normal opacity-80"
+            >
+              <IconTag className="size-3 opacity-70" />
+              {versionInfo.version}
+            </Badge>
+          )
+        }
         children={
           <Button variant="outline" asChild>
             <Link to="/config/raw">
@@ -307,6 +346,12 @@ export function ConfigPage() {
                 </div>
               )}
 
+              <LauncherSection
+                launcherForm={launcherForm}
+                onFieldChange={updateLauncherField}
+                disabled={saving || isLauncherLoading}
+              />
+
               <AgentDefaultsSection form={form} onFieldChange={updateField} />
 
               <RuntimeSection form={form} onFieldChange={updateField} />
@@ -314,12 +359,6 @@ export function ConfigPage() {
               <ExecSection form={form} onFieldChange={updateField} />
 
               <CronSection form={form} onFieldChange={updateField} />
-
-              <LauncherSection
-                launcherForm={launcherForm}
-                onFieldChange={updateLauncherField}
-                disabled={saving || isLauncherLoading}
-              />
 
               <DevicesSection
                 form={form}

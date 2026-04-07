@@ -1,4 +1,4 @@
-From bbccd5f4466f72b9de1c0b88cf89e46d30c02fcd Mon Sep 17 00:00:00 2001
+From 1086bb293350e65a9e155b5cce1c5090cc3f82f8 Mon Sep 17 00:00:00 2001
 From: picoclaw-fork <fork@picoclaw.dev>
 Date: Tue, 7 Apr 2026 14:07:42 +0200
 Subject: [PATCH] feat(tools): relax exec guard to allow shell features and
