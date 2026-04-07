@@ -67,4 +67,4 @@ web/backend/dist/*
 .claude/
 
 docker/data
-vendor/picoclaw
+vendor/picoclaw/
